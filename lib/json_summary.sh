@@ -56,7 +56,21 @@ write_summary_json() {
           else if(a[1]=="size") size=a[2];
           else if(a[1]=="offer") offer=a[2];
           else if(a[1]=="sku") sku=a[2];
-        else if(a[1]=="detail") detail=a[2];
+          else if(a[1]=="detail") detail=a[2];
+
+          pols="[]"
+          if (detail ~ /\[POLICY\]/) {
+            # extract name=... tokens; crude but effective
+            n=split(detail, parts, "\\[POLICY\\]")
+            for (i=2; i<=n; i++) {
+              m=match(parts[i], /name=([^ ]+)/, arr)
+              if (m) {
+                # append arr[1] (the name) to the array-ish string
+                pols = (pols== "[]") ? ("[\"" arr[1] "\"]") : (substr(pols,1,length(pols)-1) ",\"" arr[1] "\"]")
+              }
+            }
+          }
+          printf("{\"status\":\"%s\", ... ,\"detail\":\"%s\",\"policies\":%s}\n", status, ..., detail, pols);
       }
       # unescape %7C and %3B if you want – or keep encoded; here we keep as-is
       gsub(/"/, "\\\"", detail);

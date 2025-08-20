@@ -151,6 +151,10 @@ evaluate_policies() {
   # Args: series type size test_name vm_name
   local series="$1" type="$2" size="$3" tname="$4" vm="$5"
 
+  # jq: does JSON `has(<key>)` without quote hell
+  _jq_has() { local key="$1" json="$2"; jq -r --arg k "$key" 'has($k)' <<<"$json"; }
+
+
   # Métricas agregadas para esta VM (objeto JSON)
   local metrics; metrics=$(collect_metrics_for_vm "$vm")
 
@@ -248,11 +252,13 @@ evaluate_policies() {
 
   _eval_require() {
     local req="$1" strict="$2" had=0 ok=1
-    if [ "$(jq -r 'has(\"all_of\")' <<<"$req")" = "true" ]; then
-      had=1; _eval_group_all "$(jq -c '.all_of' <<<"$req")" "require" "$strict" || ok=0
+    if [ "$(_jq_has all_of "$req")" = "true" ]; then
+      had=1
+      _eval_group_all "$(jq -c '.all_of' <<<"$req")" "require" "$strict" || ok=0
     fi
-    if [ "$(jq -r 'has(\"any_of\")' <<<"$req")" = "true" ]; then
-      had=1; _eval_group_any  "$(jq -c '.any_of'  <<<"$req")" "require" "$strict" || ok=0
+    if [ "$(_jq_has any_of "$req")" = "true" ]; then
+      had=1
+      _eval_group_any  "$(jq -c '.any_of'  <<<"$req")" "require" "$strict" || ok=0
     fi
     if [ $had -eq 0 ]; then _eval_condition "$req" "require" "$strict" || ok=0; fi
     [ $ok -eq 1 ]
@@ -278,7 +284,7 @@ evaluate_policies() {
     if [ "$(jq -r 'length' <<<"$when")" != "0" ]; then
       _eval_group_all "$when" "when" "0" || continue
     fi
-    _eval_require "$require" "$strict" || failures+=("GLOBAL:${name}: ${msg}")
+    _eval_require "$require" "$strict" || failures+=("[POLICY] name=${name} scope=GLOBAL message=${msg}")
   done < <(jq -c '.policies.global[]?' "$CONFIG")
 
   # 2) Reglas por combinación
@@ -289,7 +295,7 @@ evaluate_policies() {
     msg=$(jq -r '.message // empty'      <<<"$rule")
     require=$(jq -c '.require // {}'     <<<"$rule")
     strict=$(jq -r '.strict // false'    <<<"$rule")
-    _eval_require "$require" "$strict" || failures+=("COMBO:${name}: ${msg}")
+    _eval_require "$require" "$strict" || failures+=("[POLICY] name=${name} scope=COMBO message=${msg}")
   done < <(jq -c '.policies.by_combo[]?' "$CONFIG")
 
   if [ ${#failures[@]} -gt 0 ]; then
@@ -456,6 +462,20 @@ run_combo() {
       set -e
       if [ $rc -ne 0 ]; then
         echo "[ERROR] Command failed with exit code $rc" | tee -a "$stdout_log"
+        if [ $rc -eq 255 ] && [ "${SSH_RETRY_ON_LOSS:-1}" = "1" ] && [ "${_retried:-0}" -eq 0 ]; then
+          log "[$vm_name] SSH 255 detected, retrying command once after 10s…"
+          sleep 10
+          _retried=1
+          # re-ejecuta exactamente el mismo comando remoto:
+          run_remote "$ssh_user" "$vm_ip" "$cmd" "$stdout_log"
+          rc=$?
+        fi
+        if [ $rc -eq 255 ]; then
+          append_skip "RUN:SSH_LOST" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" \
+                      "SSH connection lost (exit 255) while running: ${cmd}"
+          # añade detalle a BAD para que quede en resultados/summary.json
+          bad_detail="${bad_detail:+$bad_detail; }[CRITICAL] SSH_LOST exit=255 cmd=$(printf '%s' "$cmd" | tr '\n' ' ' | cut -c1-160)"
+        fi
         test_status="BAD"
         break  # abort current phase on first failure
       fi
@@ -468,6 +488,13 @@ run_combo() {
       test_status="BAD"
       # accumulate detail (if there is other BAD reason already)
       bad_detail="${bad_detail:+$bad_detail; }${pol_reason}"
+    fi
+
+    # Pretty-print each policy line to the phase log
+    if [ -n "$pol_reason" ]; then
+      echo "$pol_reason" | tr ';' '\n' | sed 's/^ *//' | while read -r pl; do
+        log "[$vm_name] $pl"
+      done
     fi
 
     # Marks phase as completed (policies gating)
@@ -513,12 +540,14 @@ print_final_summary() {
   CRIT_POWER=$(count_skip_code 'RUN:REBOOT_POWER')
   CRIT_CREATE_POWER=$(count_skip_code 'RUN:CREATE_POWER')
   CRIT_ABORT=$(count_skip_code 'RUN:ABORT_REST')
-  CRIT_TOTAL=$(( CRIT_CREATE + CRIT_IP + CRIT_SSH + CRIT_REBOOT + CRIT_POWER + CRIT_CREATE_POWER + CRIT_ABORT ))
+  CRIT_SSH_LOST=$(count_skip_code 'RUN:SSH_LOST')
+  CRIT_TOTAL=$(( CRIT_CREATE + CRIT_IP + CRIT_SSH + CRIT_REBOOT + CRIT_POWER + CRIT_CREATE_POWER + CRIT_ABORT +  CRIT_SSH_LOST))
 
   printf "%b-- CRITICAL SKIPS --%b\n" "${C_WARN}" "${C_RESET}"
   printf "RUN:CREATE     = %d\n" "$CRIT_CREATE"
   printf "RUN:IP         = %d\n" "$CRIT_IP"
   printf "RUN:SSH        = %d\n" "$CRIT_SSH"
+  printf "RUN:SSH_LOST = %d\n" "$CRIT_SSH_LOST"
   printf "RUN:REBOOT_SSH = %d\n" "$CRIT_REBOOT"
   printf "RUN:REBOOT_POWER = %d\n" "$CRIT_POWER"
   printf "RUN:CREATE_POWER = %d\n" "$CRIT_CREATE_POWER"

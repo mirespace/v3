@@ -99,28 +99,28 @@
     {
       "series": "plucky",
       "type": "amd64_server",
-      "offer": "ubuntu-24_10",
+      "offer": "ubuntu-25_04",
       "sku": "server",
       "_comments": "Gen2"
     },
     {
       "series": "plucky",
       "type": "amd64_minimal",
-      "offer": "ubuntu-24_10",
+      "offer": "ubuntu-25_04",
       "sku": "minimal",
       "_comments": "Gen2"
     },
     {
       "series": "plucky",
       "type": "arm64_server",
-      "offer": "ubuntu-24_10",
+      "offer": "ubuntu-25_04",
       "sku": "server-arm64",
       "_comments": "Gen2"
     },
     {
       "series": "plucky",
       "type": "arm64_minimal",
-      "offer": "ubuntu-24_10",
+      "offer": "ubuntu-25_04",
       "sku": "minimal-arm64",
       "_comments": "Gen2"
     }
@@ -177,7 +177,7 @@
         "UDEV_LINES=$(udevadm info /sys/class/net/$(ip a | grep SLAVE | cut -d':' -f2 | xargs) | grep -E 'AZURE_UNMANAGED_SRIOV|ID_NET_MANAGED_BY|ID_NET_DRIVER' || true); echo \"$UDEV_LINES\"; CNT=$(printf \"%s\" \"$UDEV_LINES\" | wc -l ); echo METRIC:net_all_udev_flag_count=$CNT; [ \"$CNT\" -eq 3 ] && echo METRIC:net_all_udev_flags_present=1 || echo METRIC:net_all_udev_flags_present=0",
         "if ! command -v unmkinitramfs >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get install -y initramfs-tools; fi",
         "rm -rf initramfs && mkdir -p initramfs && sudo unmkinitramfs /boot/initrd.img-$(uname -r) initramfs/",
-        "RULES=$(find initramfs/lib/udev/rules.d -maxdepth 1 -type f -name '*azure*' | wc -l | tr -d ' '); echo METRIC:initrd_azure_rules=${RULES}"
+        "RULES=$(find initramfs/*/lib/udev/rules.d -maxdepth 1 -type f -name '*0*azure*' | wc -l | tr -d ' '); echo METRIC:initrd_azure_rules=${RULES}"
       ]
     }
   ],
