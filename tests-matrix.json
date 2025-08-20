@@ -175,5 +175,68 @@
         "RULES=$(find initramfs/lib/udev/rules.d -maxdepth 1 -type f -name '*azure*' | wc -l | tr -d ' '); echo METRIC:initrd_azure_rules=${RULES}"
       ]
     }
+  ],
+  "policies": {
+  "_comments": "Policy rules are data-driven. 'when' es opcional; 'require' acepta all_of / any_of o una condición simple.",
+  "global": [
+    {
+      "name": "nvme_v2_requires_udev_and_tool",
+      "message": "When NVMe v2 is present, azure-nvme-id must succeed and initrd needs Azure udev rules.",
+      "when": [ { "metric": "has_nvme_v2", "op": "eq", "value": 1 } ],
+      "require": {
+        "all_of": [
+          { "metric": "azure_nvme_id_ok",   "op": "eq",  "value": 1 },
+          { "metric": "initrd_azure_rules", "op": "gte", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "phase2_expectations",
+      "message": "After phase2, -proposed enabled, networkd in debug, and azure-vm-utils installed.",
+      "require": {
+        "all_of": [
+          { "metric": "proposed_enabled",        "op": "eq", "value": 1 },
+          { "metric": "networkd_debug",          "op": "eq", "value": 1 },
+          { "metric": "azure_vm_utils_version",  "op": "ne", "value": "unknown" }
+        ]
+      }
+    }
+  ],
+  "by_combo": [
+    {
+      "name": "amd_e2ads_nvme_or_legacy_and_mlx",
+      "match": { "type_glob": "amd64_*", "size": "Standard_E2ads_v6" },
+      "require": {
+        "all_of": [
+          { "any_of": [
+            { "metric": "has_nvme_v2",     "op": "eq", "value": 1 },
+            { "metric": "has_nvme_legacy", "op": "eq", "value": 1 }
+          ]},
+          { "metric": "net_has_mlx", "op": "eq", "value": 1 }
+        ]
+      },
+      "message": "E2ads_v6 expects NVMe (v2 or legacy) and Mellanox NIC."
+    },
+    {
+      "name": "amd_d2alds_legacy_nvme",
+      "match": { "type_glob": "amd64_*", "size": "Standard_D2alds_v6" },
+      "require": { "all_of": [ { "metric": "has_nvme_legacy", "op": "eq", "value": 1 } ] },
+      "message": "D2alds_v6 expects legacy NVMe."
+    },
+    {
+      "name": "amd_d2ls_mana",
+      "match": { "type_glob": "amd64_*", "size": "Standard_D2ls_v6" },
+      "require": { "all_of": [ { "metric": "net_has_mana", "op": "eq", "value": 1 } ] },
+      "message": "D2ls_v6 expects MANA NIC."
+    },
+    {
+      "name": "arm_cobalt_nvme",
+      "match": { "type_glob": "arm64_*", "size_in": ["Standard_E2pds_v6","Standard_D2pds_v6","Standard_D2plds_v6"] },
+      "require": { "any_of": [
+        { "metric": "has_nvme_v2",     "op": "eq", "value": 1 },
+        { "metric": "has_nvme_legacy", "op": "eq", "value": 1 }
+      ]},
+      "message": "ARM64 Cobalt sizes expect NVMe (v2 or legacy)."
+    }
   ]
 }

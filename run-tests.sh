@@ -223,9 +223,11 @@ fi
 export PUBLISHER VERSION ADMIN_USER SSH_PUB_DEFAULT SSH_PRIV_DEFAULT rg LOCATION CONFIG CREATED_VMS_FILE ARCH_FILTER TYPE_FILTER SIZE_FILTER CLEANUP_NETWORK \
        SSH_CONNECT_TIMEOUT SSH_RETRIES SSH_SLEEP vm_name_pattern SKIP_LOG RESULTS_LOG SERIES_FILTER MAX_PARALLEL
 
-export -f log warn err catalog_lookup slugify label_for arch_for wait_vm_running metrics_from_file collect_metrics_for_vm evaluate_policies \
+export -f log warn err catalog_lookup slugify label_for arch_for wait_vm_running \
+          metrics_from_file collect_metrics_for_vm evaluate_policies \
           vm_exists wait_ssh restart_vm run_remote \
           append_skip append_result run_combo
+
 
 # Parallel exec
 active_jobs() { jobs -rp | wc -l | tr -d ' '; }

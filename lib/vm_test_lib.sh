@@ -129,77 +129,130 @@ collect_metrics_for_vm() {
   echo "$merged"
 }
 
+# --- Data-driven evaluate_policies(): lee reglas desde tests-matrix.json ---
 evaluate_policies() {
+  # Args: series type size test_name vm_name
   local series="$1" type="$2" size="$3" tname="$4" vm="$5"
+
+  # Métricas agregadas para esta VM (objeto JSON)
   local metrics; metrics=$(collect_metrics_for_vm "$vm")
 
-  getm() { printf '%s' "$metrics" | jq -r --arg k "$1" '.[$k] // empty'; }
-
-  local has_v2 has_legacy has_mana has_mlx aznvme initrd_rules proposed dbg ver
-  has_v2=$(getm has_nvme_v2)
-  has_legacy=$(getm has_nvme_legacy)
-  has_mana=$(getm net_has_mana)
-  has_mlx=$(getm net_has_mlx)
-  aznvme=$(getm azure_nvme_id_ok)
-  initrd_rules=$(getm initrd_azure_rules)
-  proposed=$(getm proposed_enabled)
-  dbg=$(getm networkd_debug)
-  ver=$(getm azure_vm_utils_version)
-
-  nz() { echo "${1:-0}"; }
-
-  local fail_reason=""
-
-  case "$type:$size" in
-    amd64_*:Standard_E2ads_v6)
-      if [ "$(nz "$has_v2")" -eq 0 ] && [ "$(nz "$has_legacy")" -eq 0 ]; then
-        fail_reason="E2ads_v6 should expose NVMe (v2 or legacy)"
-      elif [ "$(nz "$has_mlx")" -eq 0 ]; then
-        fail_reason="E2ads_v6 expects Mellanox (mlx) networking present"
-      fi
-      ;;
-    amd64_*:Standard_D2alds_v6)
-      if [ "$(nz "$has_legacy")" -eq 0 ]; then
-        fail_reason="D2alds_v6 should expose legacy NVMe (Microsoft NVMe Direct Disk)"
-      fi
-      ;;
-    amd64_*:Standard_D2ls_v6)
-      if [ "$(nz "$has_mana")" -eq 0 ]; then
-        fail_reason="D2ls_v6 should expose Net MANA driver"
-      fi
-      ;;
-    arm64_*:Standard_E2pds_v6|arm64_*:Standard_D2pds_v6|arm64_*:Standard_D2plds_v6)
-      if [ "$(nz "$has_v2")" -eq 0 ] && [ "$(nz "$has_legacy")" -eq 0 ]; then
-        fail_reason="ARM64 Cobalt NVMe sizes should expose NVMe (v2 or legacy)"
-      fi
-      ;;
-  esac
-
-  if [ "$(nz "$has_v2")" -eq 1 ]; then
-    if [ "$(nz "$aznvme")" -ne 1 ]; then
-      fail_reason="${fail_reason:+$fail_reason; }azure-nvme-id --udev should succeed when NVMe v2 is present"
+  # Helpers
+  _getm() { printf '%s' "$metrics" | jq -r --arg k "$1" '.[$k] // empty'; }
+  _is_number() { [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; }
+  _cmp() {
+    local a="$1" op="$2" b="$3"
+    if _is_number "$a" && _is_number "$b"; then
+      case "$op" in
+        eq)  awk -v A="$a" -v B="$b" 'BEGIN{exit !(A==B)}' ;;
+        ne)  awk -v A="$a" -v B="$b" 'BEGIN{exit !(A!=B)}' ;;
+        gt)  awk -v A="$a" -v B="$b" 'BEGIN{exit !(A>B)}' ;;
+        lt)  awk -v A="$a" -v B="$b" 'BEGIN{exit !(A<B)}' ;;
+        gte) awk -v A="$a" -v B="$b" 'BEGIN{exit !(A>=B)}' ;;
+        lte) awk -v A="$a" -v B="$b" 'BEGIN{exit !(A<=B)}' ;;
+        *) return 2 ;;
+      esac
+    else
+      case "$op" in
+        eq) [ "$a" = "$b" ] ;;
+        ne) [ "$a" != "$b" ] ;;
+        contains)   case "$a" in *"$b"*) return 0;; *) return 1;; esac ;;
+        ncontains)  case "$a" in *"$b"*) return 1;; *) return 0;; esac ;;
+        regex)      printf '%s' "$a" | grep -Eq "$b" ;;
+        in)         IFS=, read -r -a arr <<< "$b"; for x in "${arr[@]}"; do [ "$a" = "$x" ] && return 0; done; return 1 ;;
+        *) return 2 ;;
+      esac
     fi
-    if [ -n "$initrd_rules" ] && [ "$(nz "$initrd_rules")" -lt 1 ]; then
-      fail_reason="${fail_reason:+$fail_reason; }initrd should contain Azure udev rules when NVMe v2 is present"
+  }
+  _eval_condition() {
+    local metric op value actual
+    metric=$(jq -r '.metric // empty' <<<"$1")
+    op=$(jq -r '.op // "eq"'         <<<"$1")
+    value=$(jq -r '.value // empty'  <<<"$1")
+    actual=$(_getm "$metric")
+    _cmp "${actual:-}" "$op" "${value:-}"
+  }
+  _eval_group_all() {
+    local ok=1
+    while IFS= read -r cond; do
+      if ! _eval_condition "$cond"; then ok=0; break; fi
+    done < <(jq -c '.[]' <<<"$1")
+    [ $ok -eq 1 ]
+  }
+  _eval_group_any() {
+    local ok=0
+    while IFS= read -r cond; do
+      if _eval_condition "$cond"; then ok=1; break; fi
+    done < <(jq -c '.[]' <<<"$1")
+    [ $ok -eq 1 ]
+  }
+  _rule_applies_to_combo() {
+    local json="$1"
+    local type_glob size_match size_in series_match
+    type_glob=$(jq -r '.match.type_glob // "*"' <<<"$json")
+    series_match=$(jq -r '.match.series // "*"'     <<<"$json")
+    size_match=$(jq -r '.match.size // ""'          <<<"$json")
+    size_in=$(jq -r '.match.size_in // empty | @sh' <<<"$json")
+    # series
+    if [ "$series_match" != "*" ] && [ "$series_match" != "$series" ]; then return 1; fi
+    # type glob
+    case "$type" in $type_glob) : ;; *) return 1 ;; esac
+    # size exact
+    if [ -n "$size_match" ] && [ "$size_match" != "$size" ]; then return 1; fi
+    # size_in list
+    if [ -n "$size_in" ]; then
+      eval "arr=${size_in}"
+      local found=0
+      for s in "${arr[@]}"; do [ "$s" = "$size" ] && found=1 && break; done
+      [ $found -eq 1 ] || return 1
     fi
-  fi
+    return 0
+  }
+  _eval_require() {
+    local req="$1" had=0 ok=1
+    if [ "$(jq -r 'has("all_of")' <<<"$req")" = "true" ]; then
+      had=1; _eval_group_all "$(jq -c '.all_of' <<<"$req")" || ok=0
+    fi
+    if [ "$(jq -r 'has("any_of")' <<<"$req")" = "true" ]; then
+      had=1; _eval_group_any  "$(jq -c '.any_of'  <<<"$req")" || ok=0
+    fi
+    if [ $had -eq 0 ]; then _eval_condition "$req" || ok=0; fi
+    [ $ok -eq 1 ]
+  }
 
-  if [ -n "$proposed" ] && [ "$(nz "$proposed")" -ne 1 ]; then
-    fail_reason="${fail_reason:+$fail_reason; }-proposed should be enabled (proposed_enabled=1)"
-  fi
-  if [ -n "$dbg" ] && [ "$(nz "$dbg")" -ne 1 ]; then
-    fail_reason="${fail_reason:+$fail_reason; }systemd-networkd debug should be enabled"
-  fi
-  if [ -n "$ver" ] && [ "$ver" = "unknown" ]; then
-    fail_reason="${fail_reason:+$fail_reason; }azure-vm-utils should be installed from -proposed"
-  fi
+  local failures=()
 
-  if [ -n "$fail_reason" ]; then
-    echo "$fail_reason"
+  # 1) Reglas globales
+  while IFS= read -r rule; do
+    local name msg when require
+    name=$(jq -r '.name // "global_rule"' <<<"$rule")
+    msg=$(jq -r '.message // empty'       <<<"$rule")
+    when=$(jq -c '.when // []'            <<<"$rule")
+    require=$(jq -c '.require // {}'      <<<"$rule")
+    # 'when' (si existe) debe cumplirse para evaluar la regla
+    if [ "$(jq -r 'length' <<<"$when")" != "0" ]; then
+      _eval_group_all "$when" || continue
+    fi
+    _eval_require "$require" || failures+=("GLOBAL:${name}: ${msg}")
+  done < <(jq -c '.policies.global[]?' "$CONFIG")
+
+  # 2) Reglas por combinación
+  while IFS= read -r rule; do
+    _rule_applies_to_combo "$rule" || continue
+    local name msg require
+    name=$(jq -r '.name // "combo_rule"' <<<"$rule")
+    msg=$(jq -r '.message // empty'      <<<"$rule")
+    require=$(jq -c '.require // {}'     <<<"$rule")
+    _eval_require "$require" || failures+=("COMBO:${name}: ${msg}")
+  done < <(jq -c '.policies.by_combo[]?' "$CONFIG")
+
+  if [ ${#failures[@]} -gt 0 ]; then
+    printf "%s\n" "${failures[@]}" | paste -sd '; ' -
     return 1
   fi
   return 0
 }
+
 
 build_worklist() {
   local series_filter="$1" _rg="$2" _loc="$3" _out_array_name="$4"
