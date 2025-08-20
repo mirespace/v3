@@ -1,1 +1,4 @@
-artifacts
+artifacts*
+patches
+*.old
+_screen*.log

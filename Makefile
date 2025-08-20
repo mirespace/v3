@@ -26,12 +26,15 @@ help:
 	@echo "  make run-all TYPE=arm64_server JSON=--json"
 
 run:
-	chmod +x run-tests.sh
-	./run-tests.sh $(CONFIG) --series $(SERIES) --max-parallel $(JOBS) --arch $(ARCH) --type $(TYPE) --size $(SIZE) $(KEEP) $(JSON) $(CLEANUP_NET)
+	chmod +x run-tests.sh; \
+	rc=0; ./run-tests.sh $(CONFIG) --series $(SERIES) --max-parallel $(JOBS) --arch $(ARCH) --type $(TYPE) --size $(SIZE) $(KEEP) $(JSON) $(CLEANUP_NET) || rc=$$?; \
+	if [ $$rc -ne 0 ] && [ $$rc -ne 1 ]; then exit $$rc; fi
 
 run-all:
-	chmod +x run-tests.sh
-	./run-tests.sh $(CONFIG) --series all --max-parallel $(JOBS) --arch $(ARCH) --type $(TYPE) --size $(SIZE) $(KEEP) $(JSON) $(CLEANUP_NET)
+	chmod +x run-tests.sh; \
+	rc=0; ./run-tests.sh $(CONFIG) --series all --max-parallel $(JOBS) --arch $(ARCH) --type $(TYPE) --size $(SIZE) $(KEEP) $(JSON) $(CLEANUP_NET) || rc=$$?; \
+	if [ $$rc -ne 0 ] && [ $$rc -ne 1 ]; then exit $$rc; fi
+
 
 bootstrap:
 	@command -v jq >/dev/null 2>&1 || (echo "Installing jq..." && sudo apt-get update -y && sudo apt-get install -y jq)
