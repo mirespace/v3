@@ -56,8 +56,11 @@ write_summary_json() {
           else if(a[1]=="size") size=a[2];
           else if(a[1]=="offer") offer=a[2];
           else if(a[1]=="sku") sku=a[2];
-        }
-        printf("{\"status\":\"%s\",\"vm\":\"%s\",\"test\":\"%s\",\"series\":\"%s\",\"type\":\"%s\",\"size\":\"%s\",\"offer\":\"%s\",\"sku\":\"%s\"}\n", status, vm, test, series, type, size, offer, sku);
+        else if(a[1]=="detail") detail=a[2];
+      }
+      # unescape %7C and %3B if you want – or keep encoded; here we keep as-is
+      gsub(/"/, "\\\"", detail);
+      printf("{\"status\":\"%s\",\"vm\":\"%s\",\"test\":\"%s\",\"series\":\"%s\",\"type\":\"%s\",\"size\":\"%s\",\"offer\":\"%s\",\"sku\":\"%s\",\"detail\":\"%s\"}\n", status, vm, test, series, type, size, offer, sku, detail);
       }'
     done < "$results_log" | jq -s '.' > "$tmp_res"
     jq --slurpfile arr "$tmp_res" '.results = $arr[0]' "$out" > "$out.tmp" && mv "$out.tmp" "$out"

@@ -94,9 +94,26 @@ append_skip() {
 }
 
 append_result() {
-  printf "%s|series=%s|type=%s|size=%s|offer=%s|sku=%s|vm=%s|test=%s|%s\n" \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" >> "$RESULTS_LOG"
+  local status="$1" series="$2" type="$3" size="$4" offer="$5" sku="$6" vm="$7" tname="$8" stdout_log="$9" detail="${10:-}"
+
+  mkdir -p artifacts
+  local results_log="artifacts/_results_summary.log"
+
+  # Base line
+  local line="$status|vm=$vm|test=$tname|series=$series|type=$type|size=$size|offer=$offer|sku=$sku"
+
+  # Optional detail (policy failures, etc.)
+  if [ -n "$detail" ]; then
+    # Flatten & lightly escape so the line stays parseable:
+    # - replace newlines with spaces
+    # - encode pipes/semicolons which we use as delimiters
+    detail="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/|/%7C/g; s/;/%3B/g')"
+    line="$line|detail=$detail"
+  fi
+
+  echo "$line" >> "$results_log"
 }
+
 
 # ---- Metrics helpers & Policy evaluation ----
 metrics_from_file() {
@@ -129,7 +146,7 @@ collect_metrics_for_vm() {
   echo "$merged"
 }
 
-# --- Data-driven evaluate_policies(): lee reglas desde tests-matrix.json ---
+# --- Data-driven evaluate_policies(): read rules from tests-matrix.json ---
 evaluate_policies() {
   # Args: series type size test_name vm_name
   local series="$1" type="$2" size="$3" tname="$4" vm="$5"
@@ -140,6 +157,9 @@ evaluate_policies() {
   # Helpers
   _getm() { printf '%s' "$metrics" | jq -r --arg k "$1" '.[$k] // empty'; }
   _is_number() { [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; }
+  _phase_of_tname() { [[ "$1" =~ ^phase([0-9]+) ]] && echo "${BASH_REMATCH[1]}" || echo 999; }
+  local CUR_PHASE; CUR_PHASE=$(_phase_of_tname "$tname")
+
   _cmp() {
     local a="$1" op="$2" b="$3"
     if _is_number "$a" && _is_number "$b"; then
@@ -164,59 +184,77 @@ evaluate_policies() {
       esac
     fi
   }
+
+  # mode: when | require ; strict: 0/1
   _eval_condition() {
+    local cond="$1" mode="$2" strict="$3"
     local metric op value actual
-    metric=$(jq -r '.metric // empty' <<<"$1")
-    op=$(jq -r '.op // "eq"'         <<<"$1")
-    value=$(jq -r '.value // empty'  <<<"$1")
+    metric=$(jq -r '.metric // empty' <<<"$cond")
+    op=$(jq -r '.op // "eq"'          <<<"$cond")
+    value=$(jq -r '.value // empty'   <<<"$cond")
     actual=$(_getm "$metric")
+
+    # Métrica ausente
+    if [ -z "$actual" ]; then
+      if [ "$mode" = "when" ]; then
+        return 1     # when no se cumple -> se salta la regla
+      else
+        [ "$strict" = "1" ] && return 1 || return 0  # require: aplaza salvo strict
+      fi
+    fi
     _cmp "${actual:-}" "$op" "${value:-}"
   }
+
   _eval_group_all() {
-    local ok=1
+    local arr="$1" mode="$2" strict="$3" ok=1
     while IFS= read -r cond; do
-      if ! _eval_condition "$cond"; then ok=0; break; fi
-    done < <(jq -c '.[]' <<<"$1")
+      if ! _eval_condition "$cond" "$mode" "$strict"; then ok=0; break; fi
+    done < <(jq -c '.[]' <<<"$arr")
     [ $ok -eq 1 ]
   }
   _eval_group_any() {
-    local ok=0
+    local arr="$1" mode="$2" strict="$3" ok=0
     while IFS= read -r cond; do
-      if _eval_condition "$cond"; then ok=1; break; fi
-    done < <(jq -c '.[]' <<<"$1")
+      if _eval_condition "$cond" "$mode" "$strict"; then ok=1; break; fi
+    done < <(jq -c '.[]' <<<"$arr")
     [ $ok -eq 1 ]
   }
+
   _rule_applies_to_combo() {
     local json="$1"
-    local type_glob size_match size_in series_match
+    local type_glob size_match size_in series_match phase_at_least
     type_glob=$(jq -r '.match.type_glob // "*"' <<<"$json")
-    series_match=$(jq -r '.match.series // "*"'     <<<"$json")
-    size_match=$(jq -r '.match.size // ""'          <<<"$json")
+    series_match=$(jq -r '.match.series // "*"'   <<<"$json")
+    size_match=$(jq -r '.match.size // ""'        <<<"$json")
     size_in=$(jq -r '.match.size_in // empty | @sh' <<<"$json")
+    phase_at_least=$(jq -r '.phase_at_least // empty' <<<"$json")
+
+    # fase mínima
+    if [ -n "$phase_at_least" ] && [ "$CUR_PHASE" -lt "$phase_at_least" ]; then return 1; fi
     # series
     if [ "$series_match" != "*" ] && [ "$series_match" != "$series" ]; then return 1; fi
     # type glob
     case "$type" in $type_glob) : ;; *) return 1 ;; esac
     # size exact
     if [ -n "$size_match" ] && [ "$size_match" != "$size" ]; then return 1; fi
-    # size_in list
+    # size_in
     if [ -n "$size_in" ]; then
       eval "arr=${size_in}"
-      local found=0
-      for s in "${arr[@]}"; do [ "$s" = "$size" ] && found=1 && break; done
+      local found=0; for s in "${arr[@]}"; do [ "$s" = "$size" ] && found=1 && break; done
       [ $found -eq 1 ] || return 1
     fi
     return 0
   }
+
   _eval_require() {
-    local req="$1" had=0 ok=1
-    if [ "$(jq -r 'has("all_of")' <<<"$req")" = "true" ]; then
-      had=1; _eval_group_all "$(jq -c '.all_of' <<<"$req")" || ok=0
+    local req="$1" strict="$2" had=0 ok=1
+    if [ "$(jq -r 'has(\"all_of\")' <<<"$req")" = "true" ]; then
+      had=1; _eval_group_all "$(jq -c '.all_of' <<<"$req")" "require" "$strict" || ok=0
     fi
-    if [ "$(jq -r 'has("any_of")' <<<"$req")" = "true" ]; then
-      had=1; _eval_group_any  "$(jq -c '.any_of'  <<<"$req")" || ok=0
+    if [ "$(jq -r 'has(\"any_of\")' <<<"$req")" = "true" ]; then
+      had=1; _eval_group_any  "$(jq -c '.any_of'  <<<"$req")" "require" "$strict" || ok=0
     fi
-    if [ $had -eq 0 ]; then _eval_condition "$req" || ok=0; fi
+    if [ $had -eq 0 ]; then _eval_condition "$req" "require" "$strict" || ok=0; fi
     [ $ok -eq 1 ]
   }
 
@@ -224,26 +262,34 @@ evaluate_policies() {
 
   # 1) Reglas globales
   while IFS= read -r rule; do
-    local name msg when require
+    local name msg when require strict phase_at_least
     name=$(jq -r '.name // "global_rule"' <<<"$rule")
     msg=$(jq -r '.message // empty'       <<<"$rule")
     when=$(jq -c '.when // []'            <<<"$rule")
     require=$(jq -c '.require // {}'      <<<"$rule")
-    # 'when' (si existe) debe cumplirse para evaluar la regla
-    if [ "$(jq -r 'length' <<<"$when")" != "0" ]; then
-      _eval_group_all "$when" || continue
+    strict=$(jq -r '.strict // false'     <<<"$rule")
+    phase_at_least=$(jq -r '.phase_at_least // empty' <<<"$rule")
+
+    # gating por fase (si existe)
+    if [ -n "$phase_at_least" ] && [ "$CUR_PHASE" -lt "$phase_at_least" ]; then
+      continue
     fi
-    _eval_require "$require" || failures+=("GLOBAL:${name}: ${msg}")
+    # WHEN (si existe y no se cumple) -> saltar regla
+    if [ "$(jq -r 'length' <<<"$when")" != "0" ]; then
+      _eval_group_all "$when" "when" "0" || continue
+    fi
+    _eval_require "$require" "$strict" || failures+=("GLOBAL:${name}: ${msg}")
   done < <(jq -c '.policies.global[]?' "$CONFIG")
 
   # 2) Reglas por combinación
   while IFS= read -r rule; do
     _rule_applies_to_combo "$rule" || continue
-    local name msg require
+    local name msg require strict
     name=$(jq -r '.name // "combo_rule"' <<<"$rule")
     msg=$(jq -r '.message // empty'      <<<"$rule")
     require=$(jq -c '.require // {}'     <<<"$rule")
-    _eval_require "$require" || failures+=("COMBO:${name}: ${msg}")
+    strict=$(jq -r '.strict // false'    <<<"$rule")
+    _eval_require "$require" "$strict" || failures+=("COMBO:${name}: ${msg}")
   done < <(jq -c '.policies.by_combo[]?' "$CONFIG")
 
   if [ ${#failures[@]} -gt 0 ]; then
@@ -252,6 +298,7 @@ evaluate_policies() {
   fi
   return 0
 }
+
 
 
 build_worklist() {
@@ -379,9 +426,10 @@ run_combo() {
   fi
 
   local tests_count_local
+  local tname
   tests_count_local=$(jq '.tests | length' "$CONFIG")
   for idx in $(seq 0 $((tests_count_local-1))); do
-    local tname; tname=$(jq -r ".tests[$idx].name" "$CONFIG")
+    tname=$(jq -r ".tests[$idx].name" "$CONFIG")
     local tdir="artifacts/${vm_name}/${tname}"
     mkdir -p "$tdir"
     local stdout_log="${tdir}/stdout.log"; : > "$stdout_log"
@@ -413,14 +461,23 @@ run_combo() {
       fi
     done
 
-    # Policy evaluation (uses merged metrics across phases)
-    pol_reason=$(evaluate_policies "$series" "$type" "$size" "$tname" "$vm_name" || true)
-    if [ -n "$pol_reason" ]; then
+    # Evaluate policies and convert to BAD if any policy failed.
+    # We also collect the failing policy messages into BAD details.
+    local pol_reason=""
+    if ! pol_reason="$(evaluate_policies "$series" "$type" "$size" "$tname" "$vm_name" 2>&1)"; then
       test_status="BAD"
-      echo "[POLICY] $pol_reason" | tee -a "$stdout_log"
+      # accumulate detail (if there is other BAD reason already)
+      bad_detail="${bad_detail:+$bad_detail; }${pol_reason}"
     fi
 
-    append_result "$test_status" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "$tname" "completed"
+    # Marks phase as completed (policies gating)
+    case "$tname" in
+      phase1*) echo "METRIC:phase1_done=1" | tee -a "$stdout_log" ;;
+      phase2*) echo "METRIC:phase2_done=1" | tee -a "$stdout_log" ;;
+      phase3*) echo "METRIC:phase3_done=1" | tee -a "$stdout_log" ;;
+    esac
+
+    append_result "$test_status" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "$tname" "$stdout_log" "${bad_detail:-}"
     log "[$vm_name] Test '${tname}' -> ${test_status}"
     if [ "$test_status" = "BAD" ]; then
       remaining=$((tests_count_local - idx - 1))

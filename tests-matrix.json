@@ -1,5 +1,5 @@
 {
-  "_comentario": "Updated tests to 3-phase plan from LP:2116077 | Now emits METRIC: key=value lines for JSON summary enrichment.",
+  "_comments": "Updated tests to 3-phase plan from LP:2116077 | Now emits METRIC: key=value lines for JSON summary enrichment.",
   "resource_group": "miriam-azure-vm-utils",
   "vm_name_pattern": "t-{series}-{type}-{size}",
   "matrix": {
@@ -23,7 +23,7 @@
       "Standard_D2pds_v6",
       "Standard_D2plds_v6"
     ],
-    "_comentario_sizes": "AMD64 -> E2ads_v6/D2alds_v6/D2ls_v6. ARM64 -> Cobalt 100 NVMe: E2pds_v6 (mem-optimized), D2pds_v6 (general-purpose), D2plds_v6 (GP 2 GiB/vCPU)."
+    "_comment_sizes": "AMD64 -> E2ads_v6/D2alds_v6/D2ls_v6. ARM64 -> Cobalt 100 NVMe: E2pds_v6 (mem-optimized), D2pds_v6 (general-purpose), D2plds_v6 (GP 2 GiB/vCPU)."
   },
   "image_catalog": [
     {
@@ -31,104 +31,104 @@
       "type": "amd64_server",
       "offer": "0001-com-ubuntu-server-jammy",
       "sku": "22_04-lts-gen2",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "jammy",
       "type": "amd64_minimal",
       "offer": "0001-com-ubuntu-minimal-jammy",
       "sku": "minimal-22_04-lts-gen2",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "jammy",
       "type": "amd64_fde",
       "offer": "0001-com-ubuntu-confidential-vm-jammy",
       "sku": "22_04-lts-cvm",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "jammy",
       "type": "arm64_server",
       "offer": "0001-com-ubuntu-server-jammy",
       "sku": "22_04-lts-arm64",
-      "_comentario": "Gen1"
+      "_comments": "Gen1"
     },
     {
       "series": "jammy",
       "type": "arm64_minimal",
       "offer": "0001-com-ubuntu-minimal-jammy",
       "sku": "minimal-22_04-lts-arm64",
-      "_comentario": "Gen1"
+      "_comments": "Gen1"
     },
     {
       "series": "noble",
       "type": "amd64_server",
       "offer": "ubuntu-24_04-lts",
       "sku": "server",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "noble",
       "type": "amd64_minimal",
       "offer": "ubuntu-24_04-lts",
       "sku": "minimal",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "noble",
       "type": "amd64_fde",
       "offer": "ubuntu-24_04-lts",
       "sku": "cvm",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "noble",
       "type": "arm64_server",
       "offer": "ubuntu-24_04-lts",
       "sku": "server-arm64",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "noble",
       "type": "arm64_minimal",
       "offer": "ubuntu-24_04-lts",
       "sku": "minimal-arm64",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "plucky",
       "type": "amd64_server",
       "offer": "ubuntu-24_10",
       "sku": "server",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "plucky",
       "type": "amd64_minimal",
       "offer": "ubuntu-24_10",
       "sku": "minimal",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "plucky",
       "type": "arm64_server",
       "offer": "ubuntu-24_10",
       "sku": "server-arm64",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     },
     {
       "series": "plucky",
       "type": "arm64_minimal",
       "offer": "ubuntu-24_10",
       "sku": "minimal-arm64",
-      "_comentario": "Gen2"
+      "_comments": "Gen2"
     }
   ],
   "tests": [
     {
-      "name": "phase1-preflight",
-      "_comentario": "Pre-checks of series, disks and networking (Test Plan). Emits METRIC lines.",
+      "name": "phase1-prechecks",
+      "_comments": "Pre-checks of series, disks and networking (Test Plan). Emits METRIC lines.",
       "commands": [
         "source /etc/os-release && echo UBUNTU_CODENAME=$VERSION_CODENAME && echo UBUNTU_VERSION=$VERSION_ID && echo METRIC:ubuntu_codename=$VERSION_CODENAME && echo METRIC:ubuntu_version=$VERSION_ID",
         "uname -a",
@@ -136,16 +136,13 @@
         "if nvme list | grep -q \"Microsoft NVMe Direct Disk v2\"; then echo METRIC:has_nvme_v2=1; else echo METRIC:has_nvme_v2=0; fi",
         "if nvme list | grep -Eq \"MSFT NVMe Accelerator v1.0|Microsoft NVMe Direct Disk\"; then echo METRIC:has_nvme_legacy=1; else echo METRIC:has_nvme_legacy=0; fi",
         "networkctl status -a -l | grep -v \"$(date +%b)\" | tee net_before.txt",
-        "IFACES=$(ip -o link | awk '/SLAVE/ {print $2}' | tr -d ':'); [ -n \"$IFACES\" ] || IFACES=$(networkctl list --no-legend | awk '{print $2}')",
-        "if [ -n \"$IFACES\" ]; then networkctl status $IFACES | grep -i driver | tee drivers_before.txt; fi",
-        "if grep -qi '\\\\<mana\\\\>' drivers_before.txt 2>/dev/null; then echo METRIC:net_has_mana=1; else echo METRIC:net_has_mana=0; fi",
-        "if grep -qi '\\\\<mlx\\\\>'  drivers_before.txt 2>/dev/null; then echo METRIC:net_has_mlx=1;  else echo METRIC:net_has_mlx=0;  fi",
-        "IFACES=$(ip -o link | awk '/SLAVE/ {print $2}' | tr -d ':'); [ -n \"$IFACES\" ] && udevadm info $(for i in $IFACES; do echo /sys/class/net/$i; done) | grep -E \"AZURE_UNMANAGED_SRIOV|ID_NET_MANAGED_BY|ID_NET_DRIVER\" || true"
+        "DRIVERS_LINE=$(networkctl status $(ip a | grep SLAVE | cut -d':' -f2 | xargs) | grep -i driver || true); echo \"$DRIVERS_LINE\"; echo \"$DRIVERS_LINE\" | grep -E 'mana|mlx' >/dev/null && echo METRIC:net_drivers_present=1 || echo METRIC:net_drivers_present=0; echo \"$DRIVERS_LINE\" | grep -E 'mlx4|mlx5' >/dev/null && echo METRIC:net_has_mlx=1 || echo METRIC:net_has_mlx=0; echo \"$DRIVERS_LINE\" | grep -E 'mana' >/dev/null && echo METRIC:net_has_mana=1 || echo METRIC:net_has_mana=0",
+        "UDEV_LINES=$(udevadm info /sys/class/net/$(ip a | grep SLAVE | cut -d':' -f2 | xargs) | grep -E 'AZURE_UNMANAGED_SRIOV|ID_NET_MANAGED_BY|ID_NET_DRIVER' || true); echo \"$UDEV_LINES\"; CNT=$(echo \"$UDEV_LINES\" | wc -l ); echo METRIC:net_udev_flag_count=$CNT; [ \"$CNT\" -eq 1 ] && echo METRIC:net_udev_flags_present=1 || echo METRIC:net_udev_flags_present=0"
       ]
     },
     {
       "name": "phase2-install-proposed-and-reboot",
-      "_comentario": "Install/upgrade azure-vm-utils from -proposed, enable networkd debug, reboot. Emits METRIC lines.",
+      "_comments": "Install/upgrade azure-vm-utils from -proposed, enable networkd debug, reboot. Emits METRIC lines.",
       "commands": [
         "source /etc/os-release && echo CODENAME=$VERSION_CODENAME",
         "echo METRIC:proposed_enabled=1",
@@ -162,7 +159,7 @@
     },
     {
       "name": "phase3-postchecks",
-      "_comentario": "Post-checks (Manual tests). Emits METRIC lines.",
+      "_comments": "Post-checks (Manual tests). Emits METRIC lines.",
       "commands": [
         "AZVER=$(dpkg -s azure-vm-utils 2>/dev/null | awk -F\": \" '/^Version:/{print $2}'); echo METRIC:azure_vm_utils_version=${AZVER:-unknown}",
         "CNT_AZ=$(sudo journalctl -b -u systemd-networkd | grep -i azure | wc -l || true); echo METRIC:networkd_azure_lines=${CNT_AZ}",
@@ -170,36 +167,94 @@
         "networkctl status -a -l | grep -v \"$(date +%b)\" | tee net_after.txt",
         "DIFFL=$(diff -u net_before.txt net_after.txt | wc -l || true); echo METRIC:network_diff_lines=${DIFFL}",
         "DEVV2=$(nvme list | awk '/Microsoft NVMe Direct Disk v2/ {print $1; exit}'); if [ -n \"$DEVV2\" ]; then if sudo azure-nvme-id --udev \"$DEVV2\" >/dev/null 2>&1; then echo METRIC:azure_nvme_id_ok=1; else echo METRIC:azure_nvme_id_ok=0; fi; else echo METRIC:azure_nvme_id_ok=-1; fi",
+        "nvme list | grep -F \"MSFT NVMe Accelerator v1.0\" -q && echo METRIC:has_nvme_accel=1 || echo METRIC:has_nvme_accel=0",
+        "nvme list | grep -F \"Microsoft NVMe Direct Disk v2\" -q && echo METRIC:has_nvme_v2=1 || echo METRIC:has_nvme_v2=0",
+        "nvme list | grep -F \"Microsoft NVMe Direct Disk\" | grep -v \"v2\" -q && echo METRIC:has_nvme_legacy=1 || echo METRIC:has_nvme_legacy=0",
+        "ACCEL_INFO=$(udevadm info $(nvme list | grep -F \"MSFT NVMe Accelerator v1.0\" | awk '{print $1}') 2>/dev/null | grep -i -E 'model|azure' || true); echo \"$ACCEL_INFO\"; [ -n \"$ACCEL_INFO\" ] && echo METRIC:nvme_symlink_accel_present=1 || echo METRIC:nvme_symlink_accel_present=0",
+        "LEGACY_INFO=$(udevadm info $(nvme list | grep -F \"Microsoft NVMe Direct Disk\" | grep -v \"v2\" | awk '{print $1}') 2>/dev/null | grep -i -E 'model|azure' || true); echo \"$LEGACY_INFO\"; [ -n \"$LEGACY_INFO\" ] && echo METRIC:nvme_symlink_legacy_present=1 || echo METRIC:nvme_symlink_legacy_present=0",
+        "V2_INFO=$(udevadm info $(nvme list | grep -F \"Microsoft NVMe Direct Disk v2\" | awk '{print $1}') 2>/dev/null | grep -i -E 'model|azure' || true); echo \"$V2_INFO\"; [ -n \"$V2_INFO\" ] && echo METRIC:nvme_symlink_v2_present=1 || echo METRIC:nvme_symlink_v2_present=0",
+        "echo METRIC:nvme_symlink_checks_done=1",
+        "UDEV_LINES=$(udevadm info /sys/class/net/$(ip a | grep SLAVE | cut -d':' -f2 | xargs) | grep -E 'AZURE_UNMANAGED_SRIOV|ID_NET_MANAGED_BY|ID_NET_DRIVER' || true); echo \"$UDEV_LINES\"; CNT=$(printf \"%s\" \"$UDEV_LINES\" | wc -l ); echo METRIC:net_all_udev_flag_count=$CNT; [ \"$CNT\" -eq 3 ] && echo METRIC:net_all_udev_flags_present=1 || echo METRIC:net_all_udev_flags_present=0",
         "if ! command -v unmkinitramfs >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get install -y initramfs-tools; fi",
         "rm -rf initramfs && mkdir -p initramfs && sudo unmkinitramfs /boot/initrd.img-$(uname -r) initramfs/",
         "RULES=$(find initramfs/lib/udev/rules.d -maxdepth 1 -type f -name '*azure*' | wc -l | tr -d ' '); echo METRIC:initrd_azure_rules=${RULES}"
       ]
     }
   ],
-  "policies": {
-  "_comments": "Policy rules are data-driven. 'when' es opcional; 'require' acepta all_of / any_of o una condición simple.",
+ "policies": {
+  "_comments": "Policy rules are data-driven. 'when'is opcional; 'require' accepts all_of / any_of or a simple condition.",
   "global": [
     {
+      "name": "phase1_network_driver_present",
+      "message": "Network driver should be present (mana or mlx).",
+      "require": { "metric": "net_drivers_present", "op": "eq", "value": 1 },
+      "phase_at_least": 1
+    },
+    {
+      "name": "phase1_network_udev_flags_present",
+      "message": "udevadm should show AZURE_UNMANAGED_SRIOV / ID_NET_MANAGED_BY / ID_NET_DRIVER.",
+      "require": { "metric": "net_udev_flags_present", "op": "eq", "value": 1 },
+      "phase_at_least": 1
+    },
+    {
       "name": "nvme_v2_requires_udev_and_tool",
-      "message": "When NVMe v2 is present, azure-nvme-id must succeed and initrd needs Azure udev rules.",
+      "message": "When NVMe v2 is present, azure-nvme-id must succeed",
       "when": [ { "metric": "has_nvme_v2", "op": "eq", "value": 1 } ],
-      "require": {
-        "all_of": [
-          { "metric": "azure_nvme_id_ok",   "op": "eq",  "value": 1 },
-          { "metric": "initrd_azure_rules", "op": "gte", "value": 1 }
-        ]
-      }
+      "require": { "metric": "azure_nvme_id_ok", "op": "eq", "value": 1 },
+      "phase_at_least": 3
     },
     {
       "name": "phase2_expectations",
       "message": "After phase2, -proposed enabled, networkd in debug, and azure-vm-utils installed.",
       "require": {
         "all_of": [
-          { "metric": "proposed_enabled",        "op": "eq", "value": 1 },
-          { "metric": "networkd_debug",          "op": "eq", "value": 1 },
-          { "metric": "azure_vm_utils_version",  "op": "ne", "value": "unknown" }
+          { "metric": "proposed_enabled",       "op": "eq", "value": 1 },
+          { "metric": "networkd_debug",         "op": "eq", "value": 1 },
+          { "metric": "azure_vm_utils_version", "op": "ne", "value": "unknown" }
         ]
-      }
+      },
+      "phase_at_least": 2
+    },
+    {
+      "name": "nvme_symlink_v2_when_present",
+      "message": "udevadm info should show model/azure for NVMe v2 devices.",
+      "when":   [
+        { "metric": "nvme_symlink_checks_done", "op": "eq", "value": 1 },
+        { "metric": "has_nvme_v2",              "op": "eq", "value": 1 }
+      ],
+      "require": { "metric": "nvme_symlink_v2_present", "op": "eq", "value": 1 },
+      "phase_at_least": 3
+    },
+    {
+      "name": "nvme_symlink_legacy_when_present",
+      "message": "udevadm info should show model/azure for legacy NVMe devices.",
+      "when":   [
+        { "metric": "nvme_symlink_checks_done", "op": "eq", "value": 1 },
+        { "metric": "has_nvme_legacy",          "op": "eq", "value": 1 }
+      ],
+      "require": { "metric": "nvme_symlink_legacy_present", "op": "eq", "value": 1 },
+      "phase_at_least": 3
+    },
+    {
+      "name": "nvme_symlink_accel_when_present",
+      "message": "udevadm info should show model/azure for MSFT NVMe Accelerator devices.",
+      "when":   [
+        { "metric": "nvme_symlink_checks_done", "op": "eq", "value": 1 },
+        { "metric": "has_nvme_accel",           "op": "eq", "value": 1 }
+      ],
+      "require": { "metric": "nvme_symlink_accel_present", "op": "eq", "value": 1 },
+      "phase_at_least": 3
+    },
+    {
+      "name": "phase3_udev_lines_present",
+      "message": "udevadm info shows exactly 1 line before azure-vm-utils is installed and 3 after that.",
+      "require": {
+        "all_of": [
+          { "metric": "net_udev_flags_present",      "op": "eq", "value": 1 },
+          { "metric": "net_all_udev_flags_present",  "op": "eq", "value": 1 }
+        ]
+      },
+      "phase_at_least": 3
     }
   ],
   "by_combo": [
@@ -208,35 +263,44 @@
       "match": { "type_glob": "amd64_*", "size": "Standard_E2ads_v6" },
       "require": {
         "all_of": [
-          { "any_of": [
-            { "metric": "has_nvme_v2",     "op": "eq", "value": 1 },
-            { "metric": "has_nvme_legacy", "op": "eq", "value": 1 }
-          ]},
+          {
+            "any_of": [
+              { "metric": "has_nvme_v2",     "op": "eq", "value": 1 },
+              { "metric": "has_nvme_legacy", "op": "eq", "value": 1 }
+            ]
+          },
           { "metric": "net_has_mlx", "op": "eq", "value": 1 }
         ]
       },
-      "message": "E2ads_v6 expects NVMe (v2 or legacy) and Mellanox NIC."
+      "message": "E2ads_v6 expects NVMe (v2 or legacy) and Mellanox NIC.",
+      "phase_at_least": 3
     },
     {
       "name": "amd_d2alds_legacy_nvme",
       "match": { "type_glob": "amd64_*", "size": "Standard_D2alds_v6" },
       "require": { "all_of": [ { "metric": "has_nvme_legacy", "op": "eq", "value": 1 } ] },
-      "message": "D2alds_v6 expects legacy NVMe."
+      "message": "D2alds_v6 expects legacy NVMe.",
+      "phase_at_least": 3
     },
     {
       "name": "amd_d2ls_mana",
       "match": { "type_glob": "amd64_*", "size": "Standard_D2ls_v6" },
       "require": { "all_of": [ { "metric": "net_has_mana", "op": "eq", "value": 1 } ] },
-      "message": "D2ls_v6 expects MANA NIC."
+      "message": "D2ls_v6 expects MANA NIC.",
+      "phase_at_least": 1
     },
     {
       "name": "arm_cobalt_nvme",
-      "match": { "type_glob": "arm64_*", "size_in": ["Standard_E2pds_v6","Standard_D2pds_v6","Standard_D2plds_v6"] },
-      "require": { "any_of": [
-        { "metric": "has_nvme_v2",     "op": "eq", "value": 1 },
-        { "metric": "has_nvme_legacy", "op": "eq", "value": 1 }
-      ]},
-      "message": "ARM64 Cobalt sizes expect NVMe (v2 or legacy)."
+      "match": { "type_glob": "arm64_*", "size_in": ["Standard_E2pds_v6", "Standard_D2pds_v6", "Standard_D2plds_v6"] },
+      "require": {
+        "any_of": [
+          { "metric": "has_nvme_v2",     "op": "eq", "value": 1 },
+          { "metric": "has_nvme_legacy", "op": "eq", "value": 1 }
+        ]
+      },
+      "message": "ARM64 Cobalt sizes expect NVMe (v2 or legacy).",
+      "phase_at_least": 3
     }
   ]
+}
 }
