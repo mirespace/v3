@@ -1,4 +1,5 @@
-# lib/vm_test_lib.sh
+#!/bin/bash
+# lib/vm_test_lib.sh - Versión mejorada
 # Basic log wrappers (actual colors are in bootstrap.sh)
 log()  { printf "[INFO] %s\n" "$*"; }
 warn() { printf "[WARN] %s\n" "$*"; }
@@ -39,53 +40,186 @@ arch_for() { [[ "$1" == arm64_* ]] && echo "arm" || echo "amd"; }
 
 vm_exists() { az vm show -g "$rg" -n "$1" >/dev/null 2>&1; }
 
+# ===== MEJORA 1: Sistema de timeouts adaptativos =====
+configure_adaptive_timeouts() {
+  local location="$1" vm_size="$2"
+  
+  # Timeouts base por región (algunas regiones son más lentas)
+  case "$location" in
+    eastus|westus2|centralus)
+      SSH_BASE_TIMEOUT=60
+      VM_POWER_BASE_TIMEOUT=180
+      ;;
+    northeurope|westeurope)
+      SSH_BASE_TIMEOUT=90
+      VM_POWER_BASE_TIMEOUT=240
+      ;;
+    *)
+      SSH_BASE_TIMEOUT=120  # Regiones menos comunes pueden ser más lentas
+      VM_POWER_BASE_TIMEOUT=300
+      ;;
+  esac
+  
+  # Multiplicadores por tamaño de VM
+  local size_multiplier=1.0
+  case "$vm_size" in
+    Standard_E*) size_multiplier=1.2 ;;  # VMs memory-optimized pueden ser más lentas
+    Standard_D*) size_multiplier=1.0 ;;  # VMs general purpose
+    *) size_multiplier=1.5 ;;            # Desconocidas, ser conservador
+  esac
+  
+  # Aplicar multiplicadores y configurar variables globales
+  SSH_RETRIES=$(awk "BEGIN {printf \"%.0f\", $SSH_BASE_TIMEOUT * $size_multiplier / 5}")
+  VM_POWER_RETRIES=$(awk "BEGIN {printf \"%.0f\", $VM_POWER_BASE_TIMEOUT * $size_multiplier / 5}")
+  SSH_SLEEP=5
+  VM_POWER_SLEEP=5
+  
+  log "Adaptive timeouts for $location/$vm_size: SSH_RETRIES=$SSH_RETRIES, VM_POWER_RETRIES=$VM_POWER_RETRIES"
+}
+
+# Detección inteligente de problemas de red
+detect_network_issues() {
+  local location="$1"
+  local failures=0
+  
+  # Hacer ping a endpoints Azure para detectar problemas de conectividad
+  for endpoint in "management.azure.com" "${location}.cloudapp.azure.com"; do
+    if ! timeout 10 ping -c 3 -W 5 "$endpoint" >/dev/null 2>&1; then
+      ((failures++))
+      warn "Network connectivity issue detected for $endpoint"
+    fi
+  done
+  
+  # Ajustar timeouts si hay problemas de red
+  if [ $failures -gt 0 ]; then
+    warn "Network issues detected. Increasing timeouts by 50%"
+    SSH_RETRIES=$(( SSH_RETRIES * 3 / 2 ))
+    VM_POWER_RETRIES=$(( VM_POWER_RETRIES * 3 / 2 ))
+  fi
+}
+
+# ===== MEJORA 2: SSH robusto con retry inteligente =====
+run_remote_with_retry() {
+  local ip="$1" cmd="$2" max_retries="${3:-2}" retry_delay="${4:-10}"
+  local attempt=1
+  
+  while [ $attempt -le $max_retries ]; do
+    log "[$ip] ATTEMPT $attempt/$max_retries: $cmd"
+    
+    set +e
+    timeout 300 ssh -i "$SSH_PRIV_DEFAULT" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-10}" \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        "${ADMIN_USER:-ubuntu}@${ip}" \
+        "set -eo pipefail; ${cmd}" 2>&1
+    local rc=$?
+    set -e
+    
+    case $rc in
+      0) return 0 ;;  # Success
+      124) # timeout
+        if [ $attempt -lt $max_retries ]; then
+          warn "Command timed out. Retrying in ${retry_delay}s..."
+          sleep $retry_delay
+        else
+          err "Command timed out after $max_retries attempts"
+          return 124
+        fi
+        ;;
+      255) # SSH connection lost
+        if [ $attempt -lt $max_retries ]; then
+          warn "SSH connection lost (exit 255). Retrying in ${retry_delay}s..."
+          sleep $retry_delay
+        else
+          err "SSH connection failed after $max_retries attempts"
+          return 255
+        fi
+        ;;
+      *) 
+        err "Command failed with exit code $rc"
+        return $rc
+        ;;
+    esac
+    
+    ((attempt++))
+  done
+}
+
+# Wrapper para compatibilidad con código existente
+run_remote() {
+  local ip="$1" cmd="$2"
+  run_remote_with_retry "$ip" "$cmd" 2 10
+}
+
 wait_ssh() {
   local ip="$1"
-  for _ in $(seq 1 "${SSH_RETRIES:-40}"); do
-    if ssh -i "$SSH_PRIV_DEFAULT" \
+  log "[$ip] Testing SSH connectivity (retries=$SSH_RETRIES, sleep=${SSH_SLEEP}s)..."
+  
+  for i in $(seq 1 "${SSH_RETRIES:-40}"); do
+    if timeout 15 ssh -i "$SSH_PRIV_DEFAULT" \
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           -o LogLevel=ERROR \
           -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-6}" \
           "${ADMIN_USER:-ubuntu}@${ip}" "echo ok" >/dev/null 2>&1; then
+      log "[$ip] SSH connectivity established after $i attempts"
       return 0
     fi
+    [ $((i % 10)) -eq 0 ] && log "[$ip] SSH attempt $i/$SSH_RETRIES..."
     sleep "${SSH_SLEEP:-5}"
   done
+  
+  err "[$ip] SSH not reachable after $SSH_RETRIES attempts"
   return 1
 }
-
 
 wait_vm_running() {
   local name="$1"
   local retries="${VM_POWER_RETRIES:-60}"
   local sleep_s="${VM_POWER_SLEEP:-5}"
-  log "[$name] Waiting for PowerState/running (retries=$retries, sleep=${sleep_s}s) ..."
-  for _ in $(seq 1 "$retries"); do
+  
+  log "[$name] Waiting for PowerState/running (retries=$retries, sleep=${sleep_s}s)..."
+  
+  for i in $(seq 1 "$retries"); do
+    local state
     state="$(az vm get-instance-view -g "$rg" -n "$name" --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" -o tsv 2>/dev/null | tail -n1)"
-    if [[ "$state" == "PowerState/running" ]]; then
-      log "[$name] VM is running."
-      return 0
-    fi
+    
+    case "$state" in
+      "PowerState/running")
+        log "[$name] VM is running after $i attempts"
+        return 0
+        ;;
+      "PowerState/stopped"|"PowerState/deallocated")
+        warn "[$name] VM is in state '$state', attempting start..."
+        az vm start -g "$rg" -n "$name" --no-wait >/dev/null 2>&1 || true
+        ;;
+      *)
+        [ $((i % 12)) -eq 0 ] && log "[$name] Current state: '${state:-unknown}' (attempt $i/$retries)"
+        ;;
+    esac
+    
     sleep "$sleep_s"
   done
-  warn "[$name] VM did not reach PowerState/running in time (last state='${state:-unknown}')."
+  
+  warn "[$name] VM did not reach PowerState/running in time (last state='${state:-unknown}')"
   return 1
 }
 
 restart_vm() {
   local name="$1"
   log "[$name] Restarting VM via Azure CLI..."
+  
   if ! az vm restart -g "$rg" -n "$name" --no-wait >/dev/null 2>&1; then
     warn "[$name] 'az vm restart' failed (maybe deallocated). Trying 'az vm start'..."
-    az vm start -g "$rg" -n "$name" >/dev/null
+    az vm start -g "$rg" -n "$name" --no-wait >/dev/null 2>&1 || true
   fi
-  sleep 10
-}
-
-run_remote() {
-  local ip="$1" cmd="$2"
-  ssh -i "$SSH_PRIV_DEFAULT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-      "${ADMIN_USER:-ubuntu}@${ip}" "set -eo pipefail; ${cmd}"
+  
+  # Esperar un poco antes de verificar el estado
+  sleep 15
+  wait_vm_running "$name"
 }
 
 append_skip() {
@@ -113,7 +247,6 @@ append_result() {
 
   echo "$line" >> "$results_log"
 }
-
 
 # ---- Metrics helpers & Policy evaluation ----
 metrics_from_file() {
@@ -153,7 +286,6 @@ evaluate_policies() {
 
   # jq: does JSON `has(<key>)` without quote hell
   _jq_has() { local key="$1" json="$2"; jq -r --arg k "$key" 'has($k)' <<<"$json"; }
-
 
   # Métricas agregadas para esta VM (objeto JSON)
   local metrics; metrics=$(collect_metrics_for_vm "$vm")
@@ -305,7 +437,38 @@ evaluate_policies() {
   return 0
 }
 
-
+# ===== MEJORA 3: Validación de entrada más robusta =====
+validate_combination() {
+  local series="$1" type="$2" size="$3"
+  
+  # Verificar que la combinación existe en el catálogo
+  local catalog_entry
+  catalog_entry=$(jq -r --arg s "$series" --arg t "$type" '
+    .image_catalog[] | select(.series==$s and .type==$t) | .offer + ":" + .sku
+  ' "$CONFIG")
+  
+  if [ -z "$catalog_entry" ]; then
+    return 1
+  fi
+  
+  # Para quick tests, ser más permisivo con las combinaciones
+  # Solo verificar que el tipo y size no sean completamente incompatibles
+  case "$type" in
+    arm64_*)
+      case "$size" in
+        Standard_E2ads_v6|Standard_D2alds_v6) return 1 ;;  # Solo estas son incompatibles
+        *) return 0 ;;
+      esac
+      ;;
+    amd64_*)
+      # AMD puede usar casi cualquier tamaño para testing
+      return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
 
 build_worklist() {
   local series_filter="$1" _rg="$2" _loc="$3" _out_array_name="$4"
@@ -356,17 +519,10 @@ build_worklist() {
           [[ $_ok -eq 1 ]] || continue
         fi
 
-        # Arch-specific default filtering for known sizes
-        if [[ "$_arch" == arm ]]; then
-          case "$size" in
-            Standard_E2pds_v6|Standard_D2pds_v6|Standard_D2plds_v6) : ;;
-            *) append_skip "PRE:SIZE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "-" "ARM64 only E2pds_v6/D2pds_v6/D2plds_v6"; continue ;;
-          esac
-        else
-          case "$size" in
-            Standard_E2ads_v6|Standard_D2alds_v6|Standard_D2ls_v6) : ;;
-            *) append_skip "PRE:SIZE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "-" "AMD64 only E2ads_v6/D2alds_v6/D2ls_v6"; continue ;;
-          esac
+        # ===== MEJORA: Validación robusta de combinaciones =====
+        if ! validate_combination "$series" "$type" "$size"; then
+          append_skip "PRE:VALIDATION" "$series" "$type" "$size" "$offer" "$sku" "-" "Invalid combination series/type/size"
+          continue
         fi
 
         vm_label="$(label_for "$type" "$size")"
@@ -384,8 +540,14 @@ build_worklist() {
 run_combo() {
   local series="$1" type="$2" size="$3" offer="$4" sku="$5" vm_name="$6"
 
+  # ===== MEJORA: Configurar timeouts adaptativos =====
+  configure_adaptive_timeouts "$LOCATION" "$size"
+  detect_network_issues "$LOCATION"
+
   log "[$vm_name] Starting -> series=$series type=$type size=$size offer=$offer sku=$sku"
   log "[$vm_name] Label: $(label_for "$type" "$size") | Arch: $(arch_for "$type")"
+  log "[$vm_name] Timeouts: SSH_RETRIES=$SSH_RETRIES, VM_POWER_RETRIES=$VM_POWER_RETRIES"
+  
   local artifacts_dir="artifacts/${vm_name}"
   mkdir -p "$artifacts_dir"
 
@@ -416,6 +578,12 @@ run_combo() {
     echo "$vm_name" >> "$CREATED_VMS_FILE"
   fi
 
+  # Esperar a que la VM esté corriendo antes de obtener IP
+  if ! wait_vm_running "$vm_name"; then
+    append_skip "RUN:CREATE_POWER" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "VM did not reach running state"
+    return 73
+  fi
+
   local PUBLIC_IP
   PUBLIC_IP=$(az vm show -d -g "$rg" -n "$vm_name" --query publicIps -o tsv)
   if [ -z "$PUBLIC_IP" ]; then
@@ -443,6 +611,8 @@ run_combo() {
     log "[$vm_name] Running test '${tname}' ..."
     mapfile -t cmds < <(jq -r ".tests[$idx].commands[]?" "$CONFIG")
     test_status="GOOD"
+    local bad_detail=""
+    
     for line in "${cmds[@]}"; do
       if [[ "$line" == "#REBOOT#" ]]; then
         echo -e "\n${C_INFO}[TEST]${C_RESET} Requesting VM reboot ..." | tee -a "$stdout_log"
@@ -451,31 +621,31 @@ run_combo() {
           err "[$vm_name] SSH did not recover after reboot"
           append_skip "RUN:REBOOT_SSH" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "SSH did not recover after reboot"
           test_status="BAD"
+          bad_detail="SSH connection lost after reboot"
           break
         fi
         continue
       fi
+      
       echo -e "\n${C_CMD}[COMMAND]${C_RESET} $line" | tee -a "$stdout_log"
       set +e
-      run_remote "$PUBLIC_IP" "$line" 2>&1 | tee -a "$stdout_log"
+      run_remote_with_retry "$PUBLIC_IP" "$line" 2 10 2>&1 | tee -a "$stdout_log"
       rc=${PIPESTATUS[0]}
       set -e
+      
       if [ $rc -ne 0 ]; then
         echo "[ERROR] Command failed with exit code $rc" | tee -a "$stdout_log"
-        if [ $rc -eq 255 ] && [ "${SSH_RETRY_ON_LOSS:-1}" = "1" ] && [ "${_retried:-0}" -eq 0 ]; then
-          log "[$vm_name] SSH 255 detected, retrying command once after 10s…"
-          sleep 10
-          _retried=1
-          # re-ejecuta exactamente el mismo comando remoto:
-          run_remote "$ssh_user" "$vm_ip" "$cmd" "$stdout_log"
-          rc=$?
-        fi
-        if [ $rc -eq 255 ]; then
-          append_skip "RUN:SSH_LOST" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" \
-                      "SSH connection lost (exit 255) while running: ${cmd}"
-          # añade detalle a BAD para que quede en resultados/summary.json
-          bad_detail="${bad_detail:+$bad_detail; }[CRITICAL] SSH_LOST exit=255 cmd=$(printf '%s' "$cmd" | tr '\n' ' ' | cut -c1-160)"
-        fi
+        case $rc in
+          255)
+            bad_detail="${bad_detail:+$bad_detail; }[CRITICAL] SSH_LOST exit=255 cmd=$(printf '%s' "$line" | tr '\n' ' ' | cut -c1-160)"
+            ;;
+          124)
+            bad_detail="${bad_detail:+$bad_detail; }[CRITICAL] TIMEOUT exit=124 cmd=$(printf '%s' "$line" | tr '\n' ' ' | cut -c1-160)"
+            ;;
+          *)
+            bad_detail="${bad_detail:+$bad_detail; }[ERROR] COMMAND_FAILED exit=$rc cmd=$(printf '%s' "$line" | tr '\n' ' ' | cut -c1-100)"
+            ;;
+        esac
         test_status="BAD"
         break  # abort current phase on first failure
       fi
@@ -519,6 +689,98 @@ run_combo() {
   log "[$vm_name] Completed."
 }
 
+# ===== MEJORA 4: Limpieza de red más segura =====
+is_safe_to_delete_network() {
+  local vm_name="$1" vnet_name="$2" subnet_name="$3" subnet_rg="$4" subnet_id="$5"
+  
+  # Check 1: VNet name debe ser específico para esta VM
+  local vm_lower vnet_lower
+  vm_lower=$(echo "$vm_name" | tr "[:upper:]" "[:lower:]")
+  vnet_lower=$(echo "$vnet_name" | tr "[:upper:]" "[:lower:]")
+  
+  if [[ ! ("$vnet_lower" == "$vm_lower" || 
+           "$vnet_lower" == "$vm_lower-vnet" || 
+           "$vnet_lower" == "${vm_lower}vnet" ||
+           "$vnet_lower" == "t-"*"-vnet") ]]; then
+    log "VNet name $vnet_name doesn't match VM-specific pattern"
+    return 1
+  fi
+  
+  # Check 2: Verificar que no hay otras VMs en la subnet
+  local other_vms
+  other_vms=$(az network nic list -g "$subnet_rg" --query "[?ipConfigurations[0].subnet.id=='$subnet_id'].{vm:virtualMachine.id}" -o tsv 2>/dev/null | grep -v "^$" | wc -l)
+  if [ "$other_vms" -gt 0 ]; then
+    warn "Subnet $subnet_name has $other_vms other VMs attached. Not safe to delete."
+    return 1
+  fi
+  
+  # Check 3: Verificar que es nuestro resource group o uno generado
+  if [[ "$subnet_rg" != "$rg" && "$subnet_rg" != "NetworkWatcherRG" ]]; then
+    warn "Subnet is in different resource group $subnet_rg. Not safe to delete."
+    return 1
+  fi
+  
+  # Check 4: VNet debe ser pequeña (indicador de ser dedicada)
+  local subnet_count
+  subnet_count=$(az network vnet subnet list -g "$subnet_rg" --vnet-name "$vnet_name" --query "length(@)" -o tsv 2>/dev/null || echo 999)
+  if [ "$subnet_count" -gt 3 ]; then  # Más de 3 subnets indica infraestructura compartida
+    warn "VNet $vnet_name has $subnet_count subnets. Likely shared infrastructure."
+    return 1
+  fi
+  
+  log "[$vm_name] Network cleanup safety checks passed for $vnet_name"
+  return 0
+}
+
+cleanup_subnet_safely() {
+  local vm_name="$1" subnet_rg="$2" vnet_name="$3" subnet_name="$4"
+  
+  log "[$vm_name] Attempting safe cleanup of subnet $subnet_name..."
+  
+  # Paso 1: Borrar subnet primero
+  if az network vnet subnet delete -g "$subnet_rg" --vnet-name "$vnet_name" -n "$subnet_name" >/dev/null 2>&1; then
+    log "[$vm_name] Subnet $subnet_name deleted successfully"
+  else
+    warn "[$vm_name] Failed to delete subnet $subnet_name"
+    return 1
+  fi
+  
+  # Paso 2: Verificar si VNet está vacía antes de borrarla
+  local remaining_subnets
+  remaining_subnets=$(az network vnet subnet list -g "$subnet_rg" --vnet-name "$vnet_name" --query "length(@)" -o tsv 2>/dev/null || echo 1)
+  
+  if [ "$remaining_subnets" -eq 0 ]; then
+    log "[$vm_name] VNet $vnet_name is empty. Attempting deletion..."
+    if az network vnet delete -g "$subnet_rg" -n "$vnet_name" >/dev/null 2>&1; then
+      log "[$vm_name] VNet $vnet_name deleted successfully"
+    else
+      warn "[$vm_name] Failed to delete VNet $vnet_name (may have dependencies)"
+    fi
+  else
+    log "[$vm_name] VNet $vnet_name still has $remaining_subnets subnets. Keeping it."
+  fi
+}
+
+safe_network_cleanup() {
+  local vm_name="$1" subnet_ids="$2"
+  
+  for subnet_id in $subnet_ids; do
+    local subnet_rg vnet_name subnet_name
+    subnet_rg=$(echo "$subnet_id" | awk -F"/" '{for(i=1;i<=NF;i++){if($i=="resourceGroups"){print $(i+1);break}}}')
+    vnet_name=$(echo "$subnet_id" | awk -F"/" '{for(i=1;i<=NF;i++){if($i=="virtualNetworks"){print $(i+1);break}}}')
+    subnet_name=$(echo "$subnet_id" | awk -F"/" '{for(i=1;i<=NF;i++){if($i=="subnets"){print $(i+1);break}}}')
+    
+    # Validaciones de seguridad antes de borrar
+    if ! is_safe_to_delete_network "$vm_name" "$vnet_name" "$subnet_name" "$subnet_rg" "$subnet_id"; then
+      warn "[$vm_name] Skipping VNet cleanup for $vnet_name (failed safety checks)"
+      continue
+    fi
+    
+    # Intentar limpieza gradual con validaciones
+    cleanup_subnet_safely "$vm_name" "$subnet_rg" "$vnet_name" "$subnet_name"
+  done
+}
+
 print_final_summary() {
   local results_log="$1" skip_log="$2"
 
@@ -541,19 +803,23 @@ print_final_summary() {
   CRIT_CREATE_POWER=$(count_skip_code 'RUN:CREATE_POWER')
   CRIT_ABORT=$(count_skip_code 'RUN:ABORT_REST')
   CRIT_SSH_LOST=$(count_skip_code 'RUN:SSH_LOST')
-  CRIT_TOTAL=$(( CRIT_CREATE + CRIT_IP + CRIT_SSH + CRIT_REBOOT + CRIT_POWER + CRIT_CREATE_POWER + CRIT_ABORT +  CRIT_SSH_LOST))
+  CRIT_VALIDATION=$(count_skip_code 'PRE:VALIDATION')
+  CRIT_TOTAL=$(( CRIT_CREATE + CRIT_IP + CRIT_SSH + CRIT_REBOOT + CRIT_POWER + CRIT_CREATE_POWER + CRIT_ABORT + CRIT_SSH_LOST + CRIT_VALIDATION))
 
   printf "%b-- CRITICAL SKIPS --%b\n" "${C_WARN}" "${C_RESET}"
+  printf "PRE:VALIDATION = %d\n" "$CRIT_VALIDATION"
   printf "RUN:CREATE     = %d\n" "$CRIT_CREATE"
+  printf "RUN:CREATE_POWER = %d\n" "$CRIT_CREATE_POWER"
   printf "RUN:IP         = %d\n" "$CRIT_IP"
   printf "RUN:SSH        = %d\n" "$CRIT_SSH"
-  printf "RUN:SSH_LOST = %d\n" "$CRIT_SSH_LOST"
+  printf "RUN:SSH_LOST   = %d\n" "$CRIT_SSH_LOST"
   printf "RUN:REBOOT_SSH = %d\n" "$CRIT_REBOOT"
-  printf "RUN:REBOOT_POWER = %d\n" "$CRIT_POWER"
-  printf "RUN:CREATE_POWER = %d\n" "$CRIT_CREATE_POWER"
+  printf "RUN:ABORT_REST = %d\n" "$CRIT_ABORT"
+  printf "TOTAL CRITICAL = %d\n" "$CRIT_TOTAL"
+  
   if [ "$CRIT_TOTAL" -gt 0 ]; then
     printf "%b-- Critical SKIP details --%b\n" "${C_WARN}" "${C_RESET}"
-    grep -E '^(RUN:CREATE|RUN:IP|RUN:SSH|RUN:REBOOT_SSH)\|' "$skip_log" || true
+    grep -E '^(PRE:VALIDATION|RUN:CREATE|RUN:CREATE_POWER|RUN:IP|RUN:SSH|RUN:SSH_LOST|RUN:REBOOT_SSH)\|' "$skip_log" || true
   fi
 
   if [ "$GOOD_CNT" -gt 0 ]; then

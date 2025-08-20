@@ -1,3 +1,4 @@
+#!/bin/bash
 # lib/bootstrap.sh
 # Color support (disable with NO_COLOR=1 or when not a TTY)
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
