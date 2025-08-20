@@ -1,0 +1,179 @@
+{
+  "_comentario": "Updated tests to 3-phase plan from LP:2116077 | Now emits METRIC: key=value lines for JSON summary enrichment.",
+  "resource_group": "miriam-azure-vm-utils",
+  "vm_name_pattern": "t-{series}-{type}-{size}",
+  "matrix": {
+    "series": [
+      "plucky",
+      "noble",
+      "jammy"
+    ],
+    "types": [
+      "amd64_server",
+      "amd64_minimal",
+      "amd64_fde",
+      "arm64_server",
+      "arm64_minimal"
+    ],
+    "sizes": [
+      "Standard_E2ads_v6",
+      "Standard_D2alds_v6",
+      "Standard_D2ls_v6",
+      "Standard_E2pds_v6",
+      "Standard_D2pds_v6",
+      "Standard_D2plds_v6"
+    ],
+    "_comentario_sizes": "AMD64 -> E2ads_v6/D2alds_v6/D2ls_v6. ARM64 -> Cobalt 100 NVMe: E2pds_v6 (mem-optimized), D2pds_v6 (general-purpose), D2plds_v6 (GP 2 GiB/vCPU)."
+  },
+  "image_catalog": [
+    {
+      "series": "jammy",
+      "type": "amd64_server",
+      "offer": "0001-com-ubuntu-server-jammy",
+      "sku": "22_04-lts-gen2",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "jammy",
+      "type": "amd64_minimal",
+      "offer": "0001-com-ubuntu-minimal-jammy",
+      "sku": "minimal-22_04-lts-gen2",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "jammy",
+      "type": "amd64_fde",
+      "offer": "0001-com-ubuntu-confidential-vm-jammy",
+      "sku": "22_04-lts-cvm",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "jammy",
+      "type": "arm64_server",
+      "offer": "0001-com-ubuntu-server-jammy",
+      "sku": "22_04-lts-arm64",
+      "_comentario": "Gen1"
+    },
+    {
+      "series": "jammy",
+      "type": "arm64_minimal",
+      "offer": "0001-com-ubuntu-minimal-jammy",
+      "sku": "minimal-22_04-lts-arm64",
+      "_comentario": "Gen1"
+    },
+    {
+      "series": "noble",
+      "type": "amd64_server",
+      "offer": "ubuntu-24_04-lts",
+      "sku": "server",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "amd64_minimal",
+      "offer": "ubuntu-24_04-lts",
+      "sku": "minimal",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "amd64_fde",
+      "offer": "ubuntu-24_04-lts",
+      "sku": "cvm",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "arm64_server",
+      "offer": "ubuntu-24_04-lts",
+      "sku": "server-arm64",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "arm64_minimal",
+      "offer": "ubuntu-24_04-lts",
+      "sku": "minimal-arm64",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "amd64_server",
+      "offer": "ubuntu-24_10",
+      "sku": "server",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "amd64_minimal",
+      "offer": "ubuntu-24_10",
+      "sku": "minimal",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "arm64_server",
+      "offer": "ubuntu-24_10",
+      "sku": "server-arm64",
+      "_comentario": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "arm64_minimal",
+      "offer": "ubuntu-24_10",
+      "sku": "minimal-arm64",
+      "_comentario": "Gen2"
+    }
+  ],
+  "tests": [
+    {
+      "name": "phase1-preflight",
+      "_comentario": "Pre-checks of series, disks and networking (Test Plan). Emits METRIC lines.",
+      "commands": [
+        "source /etc/os-release && echo UBUNTU_CODENAME=$VERSION_CODENAME && echo UBUNTU_VERSION=$VERSION_ID && echo METRIC:ubuntu_codename=$VERSION_CODENAME && echo METRIC:ubuntu_version=$VERSION_ID",
+        "uname -a",
+        "if ! command -v nvme >/dev/null 2>&1; then sudo apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nvme-cli; fi",
+        "if nvme list | grep -q \"Microsoft NVMe Direct Disk v2\"; then echo METRIC:has_nvme_v2=1; else echo METRIC:has_nvme_v2=0; fi",
+        "if nvme list | grep -Eq \"MSFT NVMe Accelerator v1.0|Microsoft NVMe Direct Disk\"; then echo METRIC:has_nvme_legacy=1; else echo METRIC:has_nvme_legacy=0; fi",
+        "networkctl status -a -l | grep -v \"$(date +%b)\" | tee net_before.txt",
+        "IFACES=$(ip -o link | awk '/SLAVE/ {print $2}' | tr -d ':'); [ -n \"$IFACES\" ] || IFACES=$(networkctl list --no-legend | awk '{print $2}')",
+        "if [ -n \"$IFACES\" ]; then networkctl status $IFACES | grep -i driver | tee drivers_before.txt; fi",
+        "if grep -qi '\\\\<mana\\\\>' drivers_before.txt 2>/dev/null; then echo METRIC:net_has_mana=1; else echo METRIC:net_has_mana=0; fi",
+        "if grep -qi '\\\\<mlx\\\\>'  drivers_before.txt 2>/dev/null; then echo METRIC:net_has_mlx=1;  else echo METRIC:net_has_mlx=0;  fi",
+        "IFACES=$(ip -o link | awk '/SLAVE/ {print $2}' | tr -d ':'); [ -n \"$IFACES\" ] && udevadm info $(for i in $IFACES; do echo /sys/class/net/$i; done) | grep -E \"AZURE_UNMANAGED_SRIOV|ID_NET_MANAGED_BY|ID_NET_DRIVER\" || true"
+      ]
+    },
+    {
+      "name": "phase2-install-proposed-and-reboot",
+      "_comentario": "Install/upgrade azure-vm-utils from -proposed, enable networkd debug, reboot. Emits METRIC lines.",
+      "commands": [
+        "source /etc/os-release && echo CODENAME=$VERSION_CODENAME",
+        "echo METRIC:proposed_enabled=1",
+        "sudo bash -c 'source /etc/os-release; echo \"deb http://archive.ubuntu.com/ubuntu ${VERSION_CODENAME}-proposed main restricted universe multiverse\" > /etc/apt/sources.list.d/proposed.list'",
+        "sudo bash -c 'source /etc/os-release; printf \"Package: *\\nPin: release a=%s-proposed\\nPin-Priority: 400\\n\" \"$VERSION_CODENAME\" > /etc/apt/preferences.d/proposed'",
+        "sudo apt-get update -y",
+        "sudo bash -c 'source /etc/os-release; DEBIAN_FRONTEND=noninteractive apt-get install -y -t ${VERSION_CODENAME}-proposed azure-vm-utils'",
+        "AZVER=$(dpkg -s azure-vm-utils 2>/dev/null | awk -F\": \" '/^Version:/{print $2}'); echo METRIC:azure_vm_utils_version=${AZVER:-unknown}",
+        "sudo mkdir -p /etc/systemd/system/systemd-networkd.service.d",
+        "echo -e '[Service]\\nEnvironment=SYSTEMD_LOG_LEVEL=debug' | sudo tee /etc/systemd/system/systemd-networkd.service.d/10-debug.conf >/dev/null",
+        "sudo systemctl daemon-reload && echo METRIC:networkd_debug=1",
+        "#REBOOT#"
+      ]
+    },
+    {
+      "name": "phase3-postchecks",
+      "_comentario": "Post-checks (Manual tests). Emits METRIC lines.",
+      "commands": [
+        "AZVER=$(dpkg -s azure-vm-utils 2>/dev/null | awk -F\": \" '/^Version:/{print $2}'); echo METRIC:azure_vm_utils_version=${AZVER:-unknown}",
+        "CNT_AZ=$(sudo journalctl -b -u systemd-networkd | grep -i azure | wc -l || true); echo METRIC:networkd_azure_lines=${CNT_AZ}",
+        "CNT_UNM=$(sudo journalctl -b -u systemd-networkd | grep -i unmanaged | wc -l || true); echo METRIC:networkd_unmanaged_lines=${CNT_UNM}",
+        "networkctl status -a -l | grep -v \"$(date +%b)\" | tee net_after.txt",
+        "DIFFL=$(diff -u net_before.txt net_after.txt | wc -l || true); echo METRIC:network_diff_lines=${DIFFL}",
+        "DEVV2=$(nvme list | awk '/Microsoft NVMe Direct Disk v2/ {print $1; exit}'); if [ -n \"$DEVV2\" ]; then if sudo azure-nvme-id --udev \"$DEVV2\" >/dev/null 2>&1; then echo METRIC:azure_nvme_id_ok=1; else echo METRIC:azure_nvme_id_ok=0; fi; else echo METRIC:azure_nvme_id_ok=-1; fi",
+        "if ! command -v unmkinitramfs >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get install -y initramfs-tools; fi",
+        "rm -rf initramfs && mkdir -p initramfs && sudo unmkinitramfs /boot/initrd.img-$(uname -r) initramfs/",
+        "RULES=$(find initramfs/lib/udev/rules.d -maxdepth 1 -type f -name '*azure*' | wc -l | tr -d ' '); echo METRIC:initrd_azure_rules=${RULES}"
+      ]
+    }
+  ]
+}
