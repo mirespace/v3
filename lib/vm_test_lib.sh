@@ -46,6 +46,9 @@ wait_ssh() {
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           -o LogLevel=ERROR \
           -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-6}" \
+          -o ServerAliveInterval="${SERVER_ALIVE_INTERVAL:-10}" \
+          -o ServerAliveCountMax="${SERVER_ALIVE_COUNTMAX:-6}" \
+          -o ConnectionAttempts=1 \
           "${ADMIN_USER:-ubuntu}@${ip}" "echo ok" >/dev/null 2>&1; then
       return 0
     fi
@@ -84,8 +87,25 @@ restart_vm() {
 
 run_remote() {
   local ip="$1" cmd="$2"
-  ssh -i "$SSH_PRIV_DEFAULT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-      "${ADMIN_USER:-ubuntu}@${ip}" "set -eo pipefail; ${cmd}"
+  local attempts="${SSH_CMD_RETRIES:-6}"
+  local backoff_max="${SSH_MAX_BACKOFF:-20}"
+  local try=1 rc out
+  while :; do
+    set +e
+    ssh -i "$SSH_PRIV_DEFAULT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+        -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-6}" -o ServerAliveInterval="${SERVER_ALIVE_INTERVAL:-10}" \
+        -o ServerAliveCountMax="${SERVER_ALIVE_COUNTMAX:-6}" -o ConnectionAttempts=1 \
+        "${ADMIN_USER:-ubuntu}@${ip}" "set -eo pipefail; ${cmd}"
+    rc=$?
+    set -e
+    if [ $rc -eq 0 ]; then return 0; fi
+    if [ $rc -ne 255 ] || [ $try -ge $attempts ]; then return $rc; fi
+    # transient ssh error 255 -> backoff and retry
+    local sleep_s=$(( 1 << (try-1) )); if [ $sleep_s -gt $backoff_max ]; then sleep_s=$backoff_max; fi
+    warn "[SSH] transient 255 running: ${cmd}; retry ${try}/${attempts} in ${sleep_s}s..."
+    sleep "$sleep_s"
+    try=$((try+1))
+  done
 }
 
 append_skip() {

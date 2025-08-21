@@ -7,6 +7,11 @@ source "$SCRIPT_DIR/lib/vm_test_lib.sh"
 # shellcheck source=lib/bootstrap.sh
 source "$SCRIPT_DIR/lib/bootstrap.sh"
 
+# --- Stub temprano para no romper las traps si fallan los "source"
+if ! declare -F cleanup_created_vms >/dev/null 2>&1; then
+  cleanup_created_vms() { :; }
+fi
+
 print_help() {
   local cfg="${1:-}"
   cat <<'EOF'
@@ -203,6 +208,10 @@ RESULTS_LOG="artifacts/_results_summary.log"
 CREATED_VMS_FILE="artifacts/_created_vms.list"
 : > "$SKIP_LOG"; : > "$RESULTS_LOG"; : > "$CREATED_VMS_FILE"
 
+# Ensure cleanup runs even if the script aborts early
+trap 'if [ "${KEEP_VMS:-0}" -eq 0 ]; then echo "[trap] Cleaning up created VMs..."; cleanup_created_vms; else echo "[trap] KEEP_VMS=1, skipping cleanup"; fi' EXIT INT TERM
+trap 'echo "[trap] Error occurred"; exit 1' ERR
+
 # Worklist
 declare -a WORKLIST=()
 build_worklist "$SERIES_FILTER" "$rg" "$LOCATION" WORKLIST
@@ -226,7 +235,7 @@ export PUBLISHER VERSION ADMIN_USER SSH_PUB_DEFAULT SSH_PRIV_DEFAULT rg LOCATION
 export -f log warn err catalog_lookup slugify label_for arch_for wait_vm_running \
           metrics_from_file collect_metrics_for_vm evaluate_policies \
           vm_exists wait_ssh restart_vm run_remote \
-          append_skip append_result run_combo
+          append_skip append_result run_combo cleanup_created_vms
 
 
 # Parallel exec
