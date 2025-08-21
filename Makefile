@@ -1,10 +1,4 @@
-run-quick: validate
-	@echo "Running quick validation tests..."
-	chmod +x run-tests.sh
-	bash ./run-tests.sh $(CONFIG) \
-		--series $(SERIES) \
-		--max-parallel 2 \
-		--type amd64_server# Makefile for azure-vm-utils orchestrator - Enhanced version
+# Makefile for azure-vm-utils orchestrator - Clean version
 SERIES ?= noble
 JOBS   ?= 3
 ARCH   ?= all        # amd|arm|all
@@ -15,7 +9,7 @@ CONFIG ?= tests-matrix.json
 KEEP   ?=            # set to --keep-vms to skip deletion
 CLEANUP_NET ?=       # set to --cleanup-network to enable
 TIMEOUT_MULT ?= 1.0  # timeout multiplier
-DRY_RUN ?=           # set to --dry-run for cost estimation
+DRY_RUN ?=           # set to --dry-run for validation only
 
 # Advanced options
 REGION_PREF ?= eastus # preferred region for new resource groups
@@ -24,7 +18,7 @@ LOG_LEVEL ?= INFO    # INFO|DEBUG|WARN|ERROR
 .PHONY: run run-all run-quick run-arm run-amd bootstrap clean zip help validate monitor
 
 help:
-	@echo "Enhanced Azure VM Utils Test Orchestrator"
+	@echo "Azure VM Utils Test Orchestrator"
 	@echo ""
 	@echo "Basic targets:"
 	@echo "  make run           # run matrix with params (SERIES, JOBS, ARCH, TYPE, SIZE, etc.)"
@@ -54,7 +48,7 @@ help:
 	@echo "  JSON=$(JSON)              # enable JSON output"
 	@echo "  KEEP=$(KEEP)              # keep VMs after tests"
 	@echo "  CLEANUP_NET=$(CLEANUP_NET)      # cleanup networks"
-	@echo "  DRY_RUN=$(DRY_RUN)            # dry run for cost estimation"
+	@echo "  DRY_RUN=$(DRY_RUN)            # dry run for validation only"
 	@echo ""
 	@bash ./run-tests.sh $(CONFIG) --help 2>/dev/null || echo "Note: run 'make bootstrap' first to see detailed help"
 
@@ -71,21 +65,7 @@ validate:
 	@jq -r '.matrix.series[] | "  - \(.)"' $(CONFIG) | head -5
 	@echo "✓ Configuration validated successfully"
 
-# Cost estimation target
-estimate: validate
-	@echo "Estimating costs for planned execution..."
-	chmod +x run-tests.sh
-	./run-tests.sh $(CONFIG) \
-		--series $(SERIES) \
-		--max-parallel $(JOBS) \
-		--arch $(ARCH) \
-		--type $(TYPE) \
-		--size $(SIZE) \
-		--timeout-multiplier $(TIMEOUT_MULT) \
-		--dry-run \
-		$(JSON) || true
-
-# Cost-aware run with safety check
+# Main execution target
 run: validate
 	chmod +x run-tests.sh
 	bash ./run-tests.sh $(CONFIG) \
@@ -158,9 +138,9 @@ run-amd: validate
 		--timeout-multiplier $(TIMEOUT_MULT) \
 		$(KEEP) $(JSON) $(CLEANUP_NET)
 
-# Enhanced bootstrap with region preference
+# Bootstrap with region preference
 bootstrap:
-	@echo "Enhanced bootstrap process..."
+	@echo "Bootstrap process..."
 	@command -v jq >/dev/null 2>&1 || (echo "Installing jq..." && sudo apt-get update -y && sudo apt-get install -y jq)
 	@command -v az >/dev/null 2>&1 || (echo "Azure CLI 'az' not found"; exit 1)
 	@echo "✓ Dependencies available"
@@ -219,18 +199,14 @@ analyze:
 # Performance benchmark
 benchmark: clean
 	@echo "Running performance benchmark..."
-	@START_TIME=$(date +%s); \
+	@START_TIME=$$(date +%s); \
 	$(MAKE) run-quick JSON=--json JOBS=4 SERIES=noble TYPE=amd64_server SIZE=Standard_D2ls_v6; \
-	END_TIME=$(date +%s); \
-	DURATION=$((END_TIME - START_TIME)); \
+	END_TIME=$$(date +%s); \
+	DURATION=$$((END_TIME - START_TIME)); \
 	echo ""; \
 	echo "=== BENCHMARK RESULTS ==="; \
-	echo "Duration: ${DURATION}s"; \
+	echo "Duration: $${DURATION}s"; \
 	if [ -f "artifacts/summary.json" ]; then \
-		echo "Success Rate: $(jq -r '.totals.success_rate // 0' artifacts/summary.json)%"; \
-		echo "Total Tests: $(jq -r '.totals.total // 0' artifacts/summary.json)"; \
-	fi; \
-	echo "========================="f "artifacts/summary.json" ]; then \
 		echo "Success Rate: $$(jq -r '.totals.success_rate // 0' artifacts/summary.json)%"; \
 		echo "Total Tests: $$(jq -r '.totals.total // 0' artifacts/summary.json)"; \
 	fi; \
@@ -240,7 +216,7 @@ clean:
 	rm -rf artifacts/
 	@echo "✓ Cleaned artifacts directory"
 
-# Enhanced zip target with version info
+# Zip target with version info
 zip: clean
 	@VERSION=$$(date +%Y%m%d-%H%M%S); \
 	ZIP_NAME="azure-vm-utils-release-$$VERSION.zip"; \

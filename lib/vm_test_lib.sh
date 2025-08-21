@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib/vm_test_lib.sh - Versión mejorada
+# lib/vm_test_lib.sh - Versión completamente corregida
 # Basic log wrappers (actual colors are in bootstrap.sh)
 log()  { printf "[INFO] %s\n" "$*"; }
 warn() { printf "[WARN] %s\n" "$*"; }
@@ -44,7 +44,7 @@ vm_exists() { az vm show -g "$rg" -n "$1" >/dev/null 2>&1; }
 configure_adaptive_timeouts() {
   local location="$1" vm_size="$2"
   
-  # Timeouts base por región (algunas regiones son más lentas)
+  # Timeouts base por región
   case "$location" in
     eastus|westus2|centralus)
       SSH_BASE_TIMEOUT=60
@@ -55,7 +55,7 @@ configure_adaptive_timeouts() {
       VM_POWER_BASE_TIMEOUT=240
       ;;
     *)
-      SSH_BASE_TIMEOUT=120  # Regiones menos comunes pueden ser más lentas
+      SSH_BASE_TIMEOUT=120
       VM_POWER_BASE_TIMEOUT=300
       ;;
   esac
@@ -63,12 +63,12 @@ configure_adaptive_timeouts() {
   # Multiplicadores por tamaño de VM
   local size_multiplier=1.0
   case "$vm_size" in
-    Standard_E*) size_multiplier=1.2 ;;  # VMs memory-optimized pueden ser más lentas
-    Standard_D*) size_multiplier=1.0 ;;  # VMs general purpose
-    *) size_multiplier=1.5 ;;            # Desconocidas, ser conservador
+    Standard_E*) size_multiplier=1.2 ;;
+    Standard_D*) size_multiplier=1.0 ;;
+    *) size_multiplier=1.5 ;;
   esac
   
-  # Aplicar multiplicadores y configurar variables globales
+  # Aplicar multiplicadores
   SSH_RETRIES=$(awk "BEGIN {printf \"%.0f\", $SSH_BASE_TIMEOUT * $size_multiplier / 5}")
   VM_POWER_RETRIES=$(awk "BEGIN {printf \"%.0f\", $VM_POWER_BASE_TIMEOUT * $size_multiplier / 5}")
   SSH_SLEEP=5
@@ -77,24 +77,21 @@ configure_adaptive_timeouts() {
   log "Adaptive timeouts for $location/$vm_size: SSH_RETRIES=$SSH_RETRIES, VM_POWER_RETRIES=$VM_POWER_RETRIES"
 }
 
-# Detección inteligente de problemas de red
 detect_network_issues() {
   local location="$1"
   local failures=0
   
-  # Hacer ping a endpoints Azure para detectar problemas de conectividad
   for endpoint in "management.azure.com" "${location}.cloudapp.azure.com"; do
     if ! timeout 10 ping -c 3 -W 5 "$endpoint" >/dev/null 2>&1; then
-      ((failures++))
+      failures=$((failures + 1))
       warn "Network connectivity issue detected for $endpoint"
     fi
   done
   
-  # Ajustar timeouts si hay problemas de red
   if [ $failures -gt 0 ]; then
     warn "Network issues detected. Increasing timeouts by 50%"
-    SSH_RETRIES=$(( SSH_RETRIES * 3 / 2 ))
-    VM_POWER_RETRIES=$(( VM_POWER_RETRIES * 3 / 2 ))
+    SSH_RETRIES=$((SSH_RETRIES * 3 / 2))
+    VM_POWER_RETRIES=$((VM_POWER_RETRIES * 3 / 2))
   fi
 }
 
@@ -120,8 +117,8 @@ run_remote_with_retry() {
     set -e
     
     case $rc in
-      0) return 0 ;;  # Success
-      124) # timeout
+      0) return 0 ;;
+      124)
         if [ $attempt -lt $max_retries ]; then
           warn "Command timed out. Retrying in ${retry_delay}s..."
           sleep $retry_delay
@@ -130,7 +127,7 @@ run_remote_with_retry() {
           return 124
         fi
         ;;
-      255) # SSH connection lost
+      255)
         if [ $attempt -lt $max_retries ]; then
           warn "SSH connection lost (exit 255). Retrying in ${retry_delay}s..."
           sleep $retry_delay
@@ -145,11 +142,10 @@ run_remote_with_retry() {
         ;;
     esac
     
-    ((attempt++))
+    attempt=$((attempt + 1))
   done
 }
 
-# Wrapper para compatibilidad con código existente
 run_remote() {
   local ip="$1" cmd="$2"
   run_remote_with_retry "$ip" "$cmd" 2 10
@@ -217,7 +213,6 @@ restart_vm() {
     az vm start -g "$rg" -n "$name" --no-wait >/dev/null 2>&1 || true
   fi
   
-  # Esperar un poco antes de verificar el estado
   sleep 15
   wait_vm_running "$name"
 }
@@ -232,15 +227,9 @@ append_result() {
 
   mkdir -p artifacts
   local results_log="artifacts/_results_summary.log"
-
-  # Base line
   local line="$status|vm=$vm|test=$tname|series=$series|type=$type|size=$size|offer=$offer|sku=$sku"
 
-  # Optional detail (policy failures, etc.)
   if [ -n "$detail" ]; then
-    # Flatten & lightly escape so the line stays parseable:
-    # - replace newlines with spaces
-    # - encode pipes/semicolons which we use as delimiters
     detail="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/|/%7C/g; s/;/%3B/g')"
     line="$line|detail=$detail"
   fi
@@ -279,18 +268,13 @@ collect_metrics_for_vm() {
   echo "$merged"
 }
 
-# --- Data-driven evaluate_policies(): read rules from tests-matrix.json ---
+# --- Data-driven evaluate_policies ---
 evaluate_policies() {
-  # Args: series type size test_name vm_name
   local series="$1" type="$2" size="$3" tname="$4" vm="$5"
-
-  # jq: does JSON `has(<key>)` without quote hell
-  _jq_has() { local key="$1" json="$2"; jq -r --arg k "$key" 'has($k)' <<<"$json"; }
-
-  # Métricas agregadas para esta VM (objeto JSON)
   local metrics; metrics=$(collect_metrics_for_vm "$vm")
 
-  # Helpers
+  # Helper functions
+  _jq_has() { local key="$1" json="$2"; jq -r --arg k "$key" 'has($k)' <<<"$json"; }
   _getm() { printf '%s' "$metrics" | jq -r --arg k "$1" '.[$k] // empty'; }
   _is_number() { [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; }
   _phase_of_tname() { [[ "$1" =~ ^phase([0-9]+) ]] && echo "${BASH_REMATCH[1]}" || echo 999; }
@@ -321,7 +305,6 @@ evaluate_policies() {
     fi
   }
 
-  # mode: when | require ; strict: 0/1
   _eval_condition() {
     local cond="$1" mode="$2" strict="$3"
     local metric op value actual
@@ -330,12 +313,11 @@ evaluate_policies() {
     value=$(jq -r '.value // empty'   <<<"$cond")
     actual=$(_getm "$metric")
 
-    # Métrica ausente
     if [ -z "$actual" ]; then
       if [ "$mode" = "when" ]; then
-        return 1     # when no se cumple -> se salta la regla
+        return 1
       else
-        [ "$strict" = "1" ] && return 1 || return 0  # require: aplaza salvo strict
+        [ "$strict" = "1" ] && return 1 || return 0
       fi
     fi
     _cmp "${actual:-}" "$op" "${value:-}"
@@ -348,6 +330,7 @@ evaluate_policies() {
     done < <(jq -c '.[]' <<<"$arr")
     [ $ok -eq 1 ]
   }
+
   _eval_group_any() {
     local arr="$1" mode="$2" strict="$3" ok=0
     while IFS= read -r cond; do
@@ -356,29 +339,54 @@ evaluate_policies() {
     [ $ok -eq 1 ]
   }
 
+  # FIXED: _rule_applies_to_combo function without eval usage
   _rule_applies_to_combo() {
     local json="$1"
-    local type_glob size_match size_in series_match phase_at_least
+    local type_glob size_match series_match phase_at_least
     type_glob=$(jq -r '.match.type_glob // "*"' <<<"$json")
     series_match=$(jq -r '.match.series // "*"'   <<<"$json")
     size_match=$(jq -r '.match.size // ""'        <<<"$json")
-    size_in=$(jq -r '.match.size_in // empty | @sh' <<<"$json")
     phase_at_least=$(jq -r '.phase_at_least // empty' <<<"$json")
 
-    # fase mínima
-    if [ -n "$phase_at_least" ] && [ "$CUR_PHASE" -lt "$phase_at_least" ]; then return 1; fi
-    # series
-    if [ "$series_match" != "*" ] && [ "$series_match" != "$series" ]; then return 1; fi
-    # type glob
-    case "$type" in $type_glob) : ;; *) return 1 ;; esac
-    # size exact
-    if [ -n "$size_match" ] && [ "$size_match" != "$size" ]; then return 1; fi
-    # size_in
-    if [ -n "$size_in" ]; then
-      eval "arr=${size_in}"
-      local found=0; for s in "${arr[@]}"; do [ "$s" = "$size" ] && found=1 && break; done
-      [ $found -eq 1 ] || return 1
+    # Check phase
+    if [ -n "$phase_at_least" ] && [ "$CUR_PHASE" -lt "$phase_at_least" ]; then 
+      return 1
     fi
+    
+    # Check series
+    if [ "$series_match" != "*" ] && [ "$series_match" != "$series" ]; then 
+      return 1
+    fi
+    
+    # Check type glob
+    case "$type" in 
+      $type_glob) : ;; 
+      *) return 1 ;; 
+    esac
+    
+    # Check size exact match
+    if [ -n "$size_match" ] && [ "$size_match" != "$size" ]; then 
+      return 1
+    fi
+    
+    # FIXED: Check size_in array without dangerous eval
+    local has_size_in
+    has_size_in=$(jq -r '.match | has("size_in")' <<<"$json" 2>/dev/null || echo "false")
+    if [ "$has_size_in" = "true" ]; then
+      local size_found=false
+      while IFS= read -r size_item; do
+        [ -z "$size_item" ] && continue
+        if [ "$size_item" = "$size" ]; then
+          size_found=true
+          break
+        fi
+      done < <(jq -r '.match.size_in[]?' <<<"$json" 2>/dev/null || true)
+      
+      if [ "$size_found" = "false" ]; then
+        return 1
+      fi
+    fi
+    
     return 0
   }
 
@@ -392,13 +400,15 @@ evaluate_policies() {
       had=1
       _eval_group_any  "$(jq -c '.any_of'  <<<"$req")" "require" "$strict" || ok=0
     fi
-    if [ $had -eq 0 ]; then _eval_condition "$req" "require" "$strict" || ok=0; fi
+    if [ $had -eq 0 ]; then 
+      _eval_condition "$req" "require" "$strict" || ok=0
+    fi
     [ $ok -eq 1 ]
   }
 
   local failures=()
 
-  # 1) Reglas globales
+  # Process global policies
   while IFS= read -r rule; do
     local name msg when require strict phase_at_least
     name=$(jq -r '.name // "global_rule"' <<<"$rule")
@@ -408,18 +418,18 @@ evaluate_policies() {
     strict=$(jq -r '.strict // false'     <<<"$rule")
     phase_at_least=$(jq -r '.phase_at_least // empty' <<<"$rule")
 
-    # gating por fase (si existe)
     if [ -n "$phase_at_least" ] && [ "$CUR_PHASE" -lt "$phase_at_least" ]; then
       continue
     fi
-    # WHEN (si existe y no se cumple) -> saltar regla
+    
     if [ "$(jq -r 'length' <<<"$when")" != "0" ]; then
       _eval_group_all "$when" "when" "0" || continue
     fi
+    
     _eval_require "$require" "$strict" || failures+=("[POLICY] name=${name} scope=GLOBAL message=${msg}")
   done < <(jq -c '.policies.global[]?' "$CONFIG")
 
-  # 2) Reglas por combinación
+  # Process combo policies  
   while IFS= read -r rule; do
     _rule_applies_to_combo "$rule" || continue
     local name msg require strict
@@ -437,11 +447,9 @@ evaluate_policies() {
   return 0
 }
 
-# ===== MEJORA 3: Validación de entrada más robusta =====
 validate_combination() {
   local series="$1" type="$2" size="$3"
   
-  # Verificar que la combinación existe en el catálogo
   local catalog_entry
   catalog_entry=$(jq -r --arg s "$series" --arg t "$type" '
     .image_catalog[] | select(.series==$s and .type==$t) | .offer + ":" + .sku
@@ -451,17 +459,14 @@ validate_combination() {
     return 1
   fi
   
-  # Para quick tests, ser más permisivo con las combinaciones
-  # Solo verificar que el tipo y size no sean completamente incompatibles
   case "$type" in
     arm64_*)
       case "$size" in
-        Standard_E2ads_v6|Standard_D2alds_v6) return 1 ;;  # Solo estas son incompatibles
+        Standard_E2ads_v6|Standard_D2alds_v6) return 1 ;;
         *) return 0 ;;
       esac
       ;;
     amd64_*)
-      # AMD puede usar casi cualquier tamaño para testing
       return 0
       ;;
     *)
@@ -477,18 +482,15 @@ build_worklist() {
   for series in "${SERIES[@]}"; do
     [[ "$series_filter" != "all" && "$series" != "$series_filter" ]] && continue
     for type in "${TYPES[@]}"; do
-      # Filter by --type (comma-separated)
       if [[ "${TYPE_FILTER:-all}" != "all" ]]; then
         IFS="," read -r -a _tf <<< "$TYPE_FILTER"
         _ok=0; for _t in "${_tf[@]}"; do [[ "$type" == "$_t" ]] && _ok=1 && break; done
         [[ $_ok -eq 1 ]] || continue
       fi
 
-      # Filter by --arch (derived from type label if provided)
       _arch=$(arch_for "$type")
       if [[ "${ARCH_FILTER:-all}" != "all" && "$_arch" != "$ARCH_FILTER" ]]; then continue; fi
 
-      # Lookup image offer/sku
       mapfile -t osline < <(catalog_lookup "$series" "$type" || true)
       if [ "${#osline[@]}" -eq 0 ]; then
         warn "SKIP (CATALOG): no entry for series='$series' type='$type'."
@@ -497,7 +499,6 @@ build_worklist() {
       fi
       IFS=$'\t' read -r offer sku <<<"${osline[0]}"
 
-      # Validate availability in region -> SKIP early if not
       offer_ok=$(az vm image list-offers --location "$_loc" --publisher "${PUBLISHER:-Canonical}" --query "[?name=='$offer'] | length(@)" -o tsv)
       if [ "$offer_ok" != "1" ]; then
         warn "SKIP: offer '$offer' not available in '$_loc'."
@@ -512,14 +513,12 @@ build_worklist() {
       fi
 
       for size in "${SIZES[@]}"; do
-        # Filter by --size (comma-separated)
         if [[ "${SIZE_FILTER:-all}" != "all" ]]; then
           IFS="," read -r -a _sf <<< "$SIZE_FILTER"
           _ok=0; for _s in "${_sf[@]}"; do [[ "$size" == "$_s" ]] && _ok=1 && break; done
           [[ $_ok -eq 1 ]] || continue
         fi
 
-        # ===== MEJORA: Validación robusta de combinaciones =====
         if ! validate_combination "$series" "$type" "$size"; then
           append_skip "PRE:VALIDATION" "$series" "$type" "$size" "$offer" "$sku" "-" "Invalid combination series/type/size"
           continue
@@ -540,7 +539,6 @@ build_worklist() {
 run_combo() {
   local series="$1" type="$2" size="$3" offer="$4" sku="$5" vm_name="$6"
 
-  # ===== MEJORA: Configurar timeouts adaptativos =====
   configure_adaptive_timeouts "$LOCATION" "$size"
   detect_network_issues "$LOCATION"
 
@@ -578,7 +576,6 @@ run_combo() {
     echo "$vm_name" >> "$CREATED_VMS_FILE"
   fi
 
-  # Esperar a que la VM esté corriendo antes de obtener IP
   if ! wait_vm_running "$vm_name"; then
     append_skip "RUN:CREATE_POWER" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "VM did not reach running state"
     return 73
@@ -647,27 +644,25 @@ run_combo() {
             ;;
         esac
         test_status="BAD"
-        break  # abort current phase on first failure
+        break
       fi
     done
 
-    # Evaluate policies and convert to BAD if any policy failed.
-    # We also collect the failing policy messages into BAD details.
+    # Evaluate policies
     local pol_reason=""
     if ! pol_reason="$(evaluate_policies "$series" "$type" "$size" "$tname" "$vm_name" 2>&1)"; then
       test_status="BAD"
-      # accumulate detail (if there is other BAD reason already)
       bad_detail="${bad_detail:+$bad_detail; }${pol_reason}"
     fi
 
-    # Pretty-print each policy line to the phase log
+    # Print policy results
     if [ -n "$pol_reason" ]; then
       echo "$pol_reason" | tr ';' '\n' | sed 's/^ *//' | while read -r pl; do
         log "[$vm_name] $pl"
       done
     fi
 
-    # Marks phase as completed (policies gating)
+    # Mark phase completion
     case "$tname" in
       phase1*) echo "METRIC:phase1_done=1" | tee -a "$stdout_log" ;;
       phase2*) echo "METRIC:phase2_done=1" | tee -a "$stdout_log" ;;
@@ -676,6 +671,7 @@ run_combo() {
 
     append_result "$test_status" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "$tname" "$stdout_log" "${bad_detail:-}"
     log "[$vm_name] Test '${tname}' -> ${test_status}"
+    
     if [ "$test_status" = "BAD" ]; then
       remaining=$((tests_count_local - idx - 1))
       warn "[$vm_name] Phase '${tname}' failed — aborting remaining ${remaining} phase(s) for this VM."
@@ -689,11 +685,10 @@ run_combo() {
   log "[$vm_name] Completed."
 }
 
-# ===== MEJORA 4: Limpieza de red más segura =====
+# Network cleanup functions
 is_safe_to_delete_network() {
   local vm_name="$1" vnet_name="$2" subnet_name="$3" subnet_rg="$4" subnet_id="$5"
   
-  # Check 1: VNet name debe ser específico para esta VM
   local vm_lower vnet_lower
   vm_lower=$(echo "$vm_name" | tr "[:upper:]" "[:lower:]")
   vnet_lower=$(echo "$vnet_name" | tr "[:upper:]" "[:lower:]")
@@ -706,7 +701,6 @@ is_safe_to_delete_network() {
     return 1
   fi
   
-  # Check 2: Verificar que no hay otras VMs en la subnet
   local other_vms
   other_vms=$(az network nic list -g "$subnet_rg" --query "[?ipConfigurations[0].subnet.id=='$subnet_id'].{vm:virtualMachine.id}" -o tsv 2>/dev/null | grep -v "^$" | wc -l)
   if [ "$other_vms" -gt 0 ]; then
@@ -714,16 +708,14 @@ is_safe_to_delete_network() {
     return 1
   fi
   
-  # Check 3: Verificar que es nuestro resource group o uno generado
   if [[ "$subnet_rg" != "$rg" && "$subnet_rg" != "NetworkWatcherRG" ]]; then
     warn "Subnet is in different resource group $subnet_rg. Not safe to delete."
     return 1
   fi
   
-  # Check 4: VNet debe ser pequeña (indicador de ser dedicada)
   local subnet_count
   subnet_count=$(az network vnet subnet list -g "$subnet_rg" --vnet-name "$vnet_name" --query "length(@)" -o tsv 2>/dev/null || echo 999)
-  if [ "$subnet_count" -gt 3 ]; then  # Más de 3 subnets indica infraestructura compartida
+  if [ "$subnet_count" -gt 3 ]; then
     warn "VNet $vnet_name has $subnet_count subnets. Likely shared infrastructure."
     return 1
   fi
@@ -737,7 +729,6 @@ cleanup_subnet_safely() {
   
   log "[$vm_name] Attempting safe cleanup of subnet $subnet_name..."
   
-  # Paso 1: Borrar subnet primero
   if az network vnet subnet delete -g "$subnet_rg" --vnet-name "$vnet_name" -n "$subnet_name" >/dev/null 2>&1; then
     log "[$vm_name] Subnet $subnet_name deleted successfully"
   else
@@ -745,7 +736,6 @@ cleanup_subnet_safely() {
     return 1
   fi
   
-  # Paso 2: Verificar si VNet está vacía antes de borrarla
   local remaining_subnets
   remaining_subnets=$(az network vnet subnet list -g "$subnet_rg" --vnet-name "$vnet_name" --query "length(@)" -o tsv 2>/dev/null || echo 1)
   
@@ -770,13 +760,11 @@ safe_network_cleanup() {
     vnet_name=$(echo "$subnet_id" | awk -F"/" '{for(i=1;i<=NF;i++){if($i=="virtualNetworks"){print $(i+1);break}}}')
     subnet_name=$(echo "$subnet_id" | awk -F"/" '{for(i=1;i<=NF;i++){if($i=="subnets"){print $(i+1);break}}}')
     
-    # Validaciones de seguridad antes de borrar
     if ! is_safe_to_delete_network "$vm_name" "$vnet_name" "$subnet_name" "$subnet_rg" "$subnet_id"; then
       warn "[$vm_name] Skipping VNet cleanup for $vnet_name (failed safety checks)"
       continue
     fi
     
-    # Intentar limpieza gradual con validaciones
     cleanup_subnet_safely "$vm_name" "$subnet_rg" "$vnet_name" "$subnet_name"
   done
 }
@@ -804,7 +792,7 @@ print_final_summary() {
   CRIT_ABORT=$(count_skip_code 'RUN:ABORT_REST')
   CRIT_SSH_LOST=$(count_skip_code 'RUN:SSH_LOST')
   CRIT_VALIDATION=$(count_skip_code 'PRE:VALIDATION')
-  CRIT_TOTAL=$(( CRIT_CREATE + CRIT_IP + CRIT_SSH + CRIT_REBOOT + CRIT_POWER + CRIT_CREATE_POWER + CRIT_ABORT + CRIT_SSH_LOST + CRIT_VALIDATION))
+  CRIT_TOTAL=$((CRIT_CREATE + CRIT_IP + CRIT_SSH + CRIT_REBOOT + CRIT_POWER + CRIT_CREATE_POWER + CRIT_ABORT + CRIT_SSH_LOST + CRIT_VALIDATION))
 
   printf "%b-- CRITICAL SKIPS --%b\n" "${C_WARN}" "${C_RESET}"
   printf "PRE:VALIDATION = %d\n" "$CRIT_VALIDATION"

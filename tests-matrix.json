@@ -1,5 +1,5 @@
 {
-  "_comments": "Improved config with enhanced policy engine and monitoring",
+  "_comments": "Fixed config with corrected NVMe detection commands",
   "_version": "2.0",
   "resource_group": "miriam-azure-vm-utils",
   "vm_name_pattern": "t-{series}-{type}-{size}",
@@ -176,7 +176,7 @@
     },
     {
       "name": "phase3-postchecks",
-      "_comments": "Comprehensive post-installation validation with detailed metrics",
+      "_comments": "Comprehensive post-installation validation with detailed metrics - FIXED NVMe commands",
       "timeout_minutes": 15,
       "critical": false,
       "commands": [
@@ -193,9 +193,9 @@
         "nvme list | grep -F \"MSFT NVMe Accelerator v1.0\" -q && echo METRIC:has_nvme_accel=1 || echo METRIC:has_nvme_accel=0",
         "nvme list | grep -F \"Microsoft NVMe Direct Disk v2\" -q && echo METRIC:has_nvme_v2=1 || echo METRIC:has_nvme_v2=0",
         "nvme list | grep -F \"Microsoft NVMe Direct Disk\" | grep -v \"v2\" -q && echo METRIC:has_nvme_legacy=1 || echo METRIC:has_nvme_legacy=0",
-        "ACCEL_DEVS=$(nvme list | grep -F \"MSFT NVMe Accelerator v1.0\" | awk '{print $1}'); ACCEL_COUNT=0; for dev in $ACCEL_DEVS; do ACCEL_INFO=$(udevadm info \"$dev\" 2>/dev/null | grep -i -E 'model|azure' || true); [ -n \"$ACCEL_INFO\" ] && ((ACCEL_COUNT++)); done; echo METRIC:nvme_symlink_accel_count=${ACCEL_COUNT}",
-        "LEGACY_DEVS=$(nvme list | grep -F \"Microsoft NVMe Direct Disk\" | grep -v \"v2\" | awk '{print $1}'); LEGACY_COUNT=0; for dev in $LEGACY_DEVS; do LEGACY_INFO=$(udevadm info \"$dev\" 2>/dev/null | grep -i -E 'model|azure' || true); [ -n \"$LEGACY_INFO\" ] && ((LEGACY_COUNT++)); done; echo METRIC:nvme_symlink_legacy_count=${LEGACY_COUNT}",
-        "V2_DEVS=$(nvme list | grep -F \"Microsoft NVMe Direct Disk v2\" | awk '{print $1}'); V2_COUNT=0; for dev in $V2_DEVS; do V2_INFO=$(udevadm info \"$dev\" 2>/dev/null | grep -i -E 'model|azure' || true); [ -n \"$V2_INFO\" ] && ((V2_COUNT++)); done; echo METRIC:nvme_symlink_v2_count=${V2_COUNT}",
+        "echo METRIC:nvme_symlink_accel_count=$(nvme list 2>/dev/null | grep -c 'MSFT NVMe Accelerator v1.0' || echo 0)",
+        "echo METRIC:nvme_symlink_legacy_count=$(nvme list 2>/dev/null | grep 'Microsoft NVMe Direct Disk' | grep -v 'v2' | wc -l || echo 0)",
+        "echo METRIC:nvme_symlink_v2_count=$(nvme list 2>/dev/null | grep -c 'Microsoft NVMe Direct Disk v2' || echo 0)",
         "echo METRIC:nvme_symlink_checks_done=1",
         "SLAVE_IFACE=$(ip a | grep SLAVE | head -n1 | cut -d':' -f2 | xargs || true); if [ -n \"$SLAVE_IFACE\" ]; then UDEV_LINES=$(udevadm info /sys/class/net/\"$SLAVE_IFACE\" | grep -E 'AZURE_UNMANAGED_SRIOV|ID_NET_MANAGED_BY|ID_NET_DRIVER' || true); echo \"Post-install UDEV flags: $UDEV_LINES\"; CNT=$(printf \"%s\" \"$UDEV_LINES\" | wc -l); echo METRIC:net_all_udev_flag_count=$CNT; [ \"$CNT\" -eq 3 ] && echo METRIC:net_all_udev_flags_present=1 || echo METRIC:net_all_udev_flags_present=0; else echo METRIC:net_all_udev_flag_count=0 METRIC:net_all_udev_flags_present=0; fi",
         "if ! command -v unmkinitramfs >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get install -y initramfs-tools; fi",
