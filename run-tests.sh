@@ -1,5 +1,5 @@
 #!/bin/bash
-# run-tests.sh - Versión completamente arreglada
+# run-tests.sh - Versión completa con limpieza robusta
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,6 +181,292 @@ log_info "main" "Filters - Arch: $ARCH_FILTER, Type: $TYPE_FILTER, Size: $SIZE_F
 [ "$CLEANUP_NETWORK" -eq 1 ] && log_info "main" "Network cleanup enabled" || log_info "main" "Network cleanup disabled"
 [ "$KEEP_VMS" -eq 1 ] && log_warn "main" "KEEP_VMS enabled: resources will NOT be deleted" || :
 
+# ===== RESOURCE TRACKING SYSTEM =====
+CREATED_RESOURCES_FILE="artifacts/_created_resources.json"
+
+# Función para registrar recursos creados
+register_resource() {
+  local vm_name="$1" resource_type="$2" resource_id="$3" resource_name="$4"
+  
+  mkdir -p artifacts
+  local timestamp; timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  
+  # Crear entrada JSON para el recurso
+  local resource_entry
+  resource_entry=$(jq -n \
+    --arg vm "$vm_name" \
+    --arg type "$resource_type" \
+    --arg id "$resource_id" \
+    --arg name "$resource_name" \
+    --arg ts "$timestamp" \
+    '{
+      vm: $vm,
+      type: $type, 
+      id: $id,
+      name: $name,
+      created_at: $ts,
+      status: "active"
+    }')
+  
+  # Agregar al archivo de recursos (crear si no existe)
+  if [ ! -f "$CREATED_RESOURCES_FILE" ]; then
+    echo "[]" > "$CREATED_RESOURCES_FILE"
+  fi
+  
+  # Agregar nueva entrada
+  jq --argjson entry "$resource_entry" '. + [$entry]' "$CREATED_RESOURCES_FILE" > "$CREATED_RESOURCES_FILE.tmp" && \
+    mv "$CREATED_RESOURCES_FILE.tmp" "$CREATED_RESOURCES_FILE"
+  
+  log_info "resource" "Registered $resource_type for VM $vm_name: $resource_name"
+}
+
+# Función para marcar recurso como eliminado
+mark_resource_deleted() {
+  local resource_id="$1"
+  
+  if [ -f "$CREATED_RESOURCES_FILE" ]; then
+    jq --arg id "$resource_id" '
+      map(if .id == $id then . + {status: "deleted", deleted_at: now | strftime("%Y-%m-%dT%H:%M:%SZ")} else . end)
+    ' "$CREATED_RESOURCES_FILE" > "$CREATED_RESOURCES_FILE.tmp" && \
+      mv "$CREATED_RESOURCES_FILE.tmp" "$CREATED_RESOURCES_FILE"
+  fi
+}
+
+# Función para obtener recursos activos de una VM
+get_vm_resources() {
+  local vm_name="$1"
+  
+  if [ ! -f "$CREATED_RESOURCES_FILE" ]; then
+    echo "[]"
+    return 0
+  fi
+  
+  jq --arg vm "$vm_name" '
+    map(select(.vm == $vm and .status == "active"))
+  ' "$CREATED_RESOURCES_FILE"
+}
+
+# ===== COMPREHENSIVE CLEANUP FUNCTIONS =====
+
+# Función de limpieza comprehensiva por VM
+cleanup_vm_comprehensive() {
+  local vm_name="$1"
+  local success=true
+  
+  log_info "cleanup" "[$vm_name] Starting comprehensive cleanup..."
+  
+  # 1. Get VM info before deletion
+  local vm_info=""
+  if az vm show -g "$rg" -n "$vm_name" >/dev/null 2>&1; then
+    vm_info=$(az vm show -g "$rg" -n "$vm_name" -o json 2>/dev/null || echo "{}")
+  fi
+  
+  # 2. Collect associated resource IDs
+  local nic_ids=() disk_ids=() ip_ids=() nsg_ids=()
+  
+  if [ "$vm_info" != "{}" ]; then
+    # Get NICs
+    mapfile -t nic_ids < <(echo "$vm_info" | jq -r '.networkProfile.networkInterfaces[]?.id // empty' 2>/dev/null || true)
+    
+    # Get OS disk
+    local os_disk_id
+    os_disk_id=$(echo "$vm_info" | jq -r '.storageProfile.osDisk.managedDisk.id // empty' 2>/dev/null || true)
+    [ -n "$os_disk_id" ] && disk_ids+=("$os_disk_id")
+    
+    # Get data disks
+    mapfile -t data_disk_ids < <(echo "$vm_info" | jq -r '.storageProfile.dataDisks[]?.managedDisk.id // empty' 2>/dev/null || true)
+    disk_ids+=("${data_disk_ids[@]}")
+  fi
+  
+  # Find associated Public IPs and NSGs by name pattern
+  mapfile -t ip_ids < <(az network public-ip list -g "$rg" --query "[?contains(name, '$vm_name')].id" -o tsv 2>/dev/null || true)
+  mapfile -t nsg_ids < <(az network nsg list -g "$rg" --query "[?contains(name, '$vm_name')].id" -o tsv 2>/dev/null || true)
+  
+  # 3. Delete VM first
+  if [ "$vm_info" != "{}" ]; then
+    log_info "cleanup" "[$vm_name] Deleting VM..."
+    if timeout 300 az vm delete -g "$rg" -n "$vm_name" --yes >/dev/null 2>&1; then
+      log_info "cleanup" "[$vm_name] VM deleted successfully"
+      mark_resource_deleted "$(echo "$vm_info" | jq -r '.id')"
+    else
+      log_error "cleanup" "[$vm_name] Failed to delete VM"
+      success=false
+    fi
+  else
+    log_warn "cleanup" "[$vm_name] VM not found, cleaning associated resources..."
+  fi
+  
+  # 4. Delete NICs
+  for nic_id in "${nic_ids[@]}"; do
+    [ -z "$nic_id" ] && continue
+    local nic_name; nic_name=$(basename "$nic_id")
+    log_info "cleanup" "[$vm_name] Deleting NIC: $nic_name"
+    
+    if timeout 120 az network nic delete --ids "$nic_id" >/dev/null 2>&1; then
+      log_info "cleanup" "[$vm_name] NIC $nic_name deleted"
+      mark_resource_deleted "$nic_id"
+    else
+      log_error "cleanup" "[$vm_name] Failed to delete NIC $nic_name"
+      success=false
+    fi
+  done
+  
+  # 5. Delete Public IPs
+  for ip_id in "${ip_ids[@]}"; do
+    [ -z "$ip_id" ] && continue
+    local ip_name; ip_name=$(basename "$ip_id")
+    log_info "cleanup" "[$vm_name] Deleting Public IP: $ip_name"
+    
+    if timeout 60 az network public-ip delete --ids "$ip_id" >/dev/null 2>&1; then
+      log_info "cleanup" "[$vm_name] Public IP $ip_name deleted"
+      mark_resource_deleted "$ip_id"
+    else
+      log_error "cleanup" "[$vm_name] Failed to delete Public IP $ip_name"
+      success=false
+    fi
+  done
+  
+  # 6. Delete NSGs
+  for nsg_id in "${nsg_ids[@]}"; do
+    [ -z "$nsg_id" ] && continue
+    local nsg_name; nsg_name=$(basename "$nsg_id")
+    log_info "cleanup" "[$vm_name] Deleting NSG: $nsg_name"
+    
+    if timeout 60 az network nsg delete --ids "$nsg_id" >/dev/null 2>&1; then
+      log_info "cleanup" "[$vm_name] NSG $nsg_name deleted"
+      mark_resource_deleted "$nsg_id"
+    else
+      log_error "cleanup" "[$vm_name] Failed to delete NSG $nsg_name"
+      success=false
+    fi
+  done
+  
+  # 7. Delete Disks (last, after VM is gone)
+  for disk_id in "${disk_ids[@]}"; do
+    [ -z "$disk_id" ] && continue
+    local disk_name; disk_name=$(basename "$disk_id")
+    log_info "cleanup" "[$vm_name] Deleting Disk: $disk_name"
+    
+    if timeout 120 az disk delete --ids "$disk_id" --yes >/dev/null 2>&1; then
+      log_info "cleanup" "[$vm_name] Disk $disk_name deleted"
+      mark_resource_deleted "$disk_id"
+    else
+      log_error "cleanup" "[$vm_name] Failed to delete Disk $disk_name"
+      success=false
+    fi
+  done
+  
+  if $success; then
+    log_info "cleanup" "[$vm_name] Comprehensive cleanup completed successfully"
+  else
+    log_warn "cleanup" "[$vm_name] Comprehensive cleanup completed with some failures"
+  fi
+  
+  return $([ "$success" = true ] && echo 0 || echo 1)
+}
+
+# Función para limpiar recursos huérfanos
+cleanup_orphaned_test_resources() {
+  log_info "cleanup" "Searching for orphaned test resources..."
+  
+  # Find resources with test naming patterns that don't have VMs
+  local orphaned_count=0
+  
+  # Orphaned NICs
+  mapfile -t orphaned_nics < <(az network nic list -g "$rg" --query "[?starts_with(name, 't-') && !virtualMachine].name" -o tsv 2>/dev/null || true)
+  for nic in "${orphaned_nics[@]}"; do
+    [ -z "$nic" ] && continue
+    log_info "cleanup" "Deleting orphaned NIC: $nic"
+    if az network nic delete -g "$rg" -n "$nic" >/dev/null 2>&1; then
+      ((orphaned_count++))
+    fi
+  done
+  
+  # Orphaned Public IPs
+  mapfile -t orphaned_ips < <(az network public-ip list -g "$rg" --query "[?starts_with(name, 't-') && !ipConfiguration].name" -o tsv 2>/dev/null || true)
+  for ip in "${orphaned_ips[@]}"; do
+    [ -z "$ip" ] && continue
+    log_info "cleanup" "Deleting orphaned Public IP: $ip"
+    if az network public-ip delete -g "$rg" -n "$ip" >/dev/null 2>&1; then
+      ((orphaned_count++))
+    fi
+  done
+  
+  # Orphaned NSGs
+  mapfile -t orphaned_nsgs < <(az network nsg list -g "$rg" --query "[?starts_with(name, 't-') && length(networkInterfaces) == \`0\`].name" -o tsv 2>/dev/null || true)
+  for nsg in "${orphaned_nsgs[@]}"; do
+    [ -z "$nsg" ] && continue
+    log_info "cleanup" "Deleting orphaned NSG: $nsg"
+    if az network nsg delete -g "$rg" -n "$nsg" >/dev/null 2>&1; then
+      ((orphaned_count++))
+    fi
+  done
+  
+  # Orphaned Disks
+  mapfile -t orphaned_disks < <(az disk list -g "$rg" --query "[?starts_with(name, 't-') && diskState == 'Unattached'].name" -o tsv 2>/dev/null || true)
+  for disk in "${orphaned_disks[@]}"; do
+    [ -z "$disk" ] && continue
+    log_info "cleanup" "Deleting orphaned Disk: $disk"
+    if az disk delete -g "$rg" -n "$disk" --yes >/dev/null 2>&1; then
+      ((orphaned_count++))
+    fi
+  done
+  
+  if [ $orphaned_count -gt 0 ]; then
+    log_info "cleanup" "Cleaned up $orphaned_count orphaned resources"
+  else
+    log_info "cleanup" "No orphaned resources found"
+  fi
+}
+
+# Enhanced cleanup_created_vms function
+cleanup_created_vms() {
+  if [ ! -s "$CREATED_VMS_FILE" ] && [ ! -f "$CREATED_RESOURCES_FILE" ]; then
+    log_info "cleanup" "No VMs or resources to cleanup"
+    return 0
+  fi
+  
+  log_info "cleanup" "Starting comprehensive cleanup of created resources..."
+  local cleanup_start; cleanup_start=$(date +%s)
+  local total_vms; total_vms=$(wc -l < "$CREATED_VMS_FILE" 2>/dev/null || echo 0)
+  local cleaned=0
+  local failed_cleanups=()
+
+  # Cleanup VMs and their resources
+  if [ -s "$CREATED_VMS_FILE" ]; then
+    while IFS= read -r vm_name; do
+      [ -z "$vm_name" ] && continue
+      ((cleaned++))
+      
+      log_info "cleanup" "[$cleaned/$total_vms] Processing VM: $vm_name"
+      
+      if ! cleanup_vm_comprehensive "$vm_name"; then
+        failed_cleanups+=("$vm_name")
+        log_warn "cleanup" "Failed to fully cleanup VM: $vm_name"
+      fi
+    done < "$CREATED_VMS_FILE"
+  fi
+
+  # Cleanup any remaining orphaned resources
+  cleanup_orphaned_test_resources
+
+  # Report results
+  local cleanup_duration; cleanup_duration=$(( $(date +%s) - cleanup_start ))
+  local failed_count=${#failed_cleanups[@]}
+  
+  if [ $failed_count -eq 0 ]; then
+    log_info "cleanup" "Cleanup completed successfully in ${cleanup_duration}s for $cleaned VMs"
+  else
+    log_warn "cleanup" "Cleanup completed in ${cleanup_duration}s. $failed_count VMs had partial failures:"
+    printf '%s\n' "${failed_cleanups[@]}" | sed 's/^/  - /'
+  fi
+  
+  # Mark cleanup completion
+  if [ -f "$CREATED_RESOURCES_FILE" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Cleanup completed" >> artifacts/_cleanup.log
+  fi
+}
+
 # Bootstrap
 if [ "$DRY_RUN" -eq 0 ]; then
   if [ -f "$SCRIPT_DIR/lib/bootstrap.sh" ]; then
@@ -314,14 +600,16 @@ if [ "$TIMEOUT_MULTIPLIER" != "1.0" ]; then
 fi
 
 export PUBLISHER VERSION ADMIN_USER SSH_PUB_DEFAULT SSH_PRIV_DEFAULT rg LOCATION CONFIG CREATED_VMS_FILE ARCH_FILTER TYPE_FILTER SIZE_FILTER CLEANUP_NETWORK \
-       SSH_CONNECT_TIMEOUT SSH_RETRIES SSH_SLEEP vm_name_pattern SKIP_LOG RESULTS_LOG SERIES_FILTER MAX_PARALLEL CORRELATION_ID TIMEOUT_MULTIPLIER
+       SSH_CONNECT_TIMEOUT SSH_RETRIES SSH_SLEEP vm_name_pattern SKIP_LOG RESULTS_LOG SERIES_FILTER MAX_PARALLEL CORRELATION_ID TIMEOUT_MULTIPLIER \
+       CREATED_RESOURCES_FILE
 
 # Export functions from vm_test_lib for use in subshells
 export -f run_combo log warn err catalog_lookup slugify label_for arch_for wait_vm_running \
           metrics_from_file collect_metrics_for_vm evaluate_policies validate_combination \
           vm_exists wait_ssh restart_vm run_remote run_remote_with_retry \
           append_skip append_result configure_adaptive_timeouts detect_network_issues \
-          is_safe_to_delete_network cleanup_subnet_safely safe_network_cleanup 2>/dev/null || true
+          is_safe_to_delete_network cleanup_subnet_safely safe_network_cleanup \
+          register_resource mark_resource_deleted get_vm_resources cleanup_vm_comprehensive 2>/dev/null || true
 
 # Simple functions for job management
 active_jobs() { 
@@ -352,65 +640,33 @@ monitor_progress() {
   printf "\n"
 }
 
-cleanup_created_vms() {
-  if [ ! -s "$CREATED_VMS_FILE" ]; then
-    log_info "cleanup" "No VMs to cleanup"
-    return 0
-  fi
-  
-  log_info "cleanup" "Starting cleanup of created VMs..."
-  local cleanup_start; cleanup_start=$(date +%s)
-  local total_vms; total_vms=$(wc -l < "$CREATED_VMS_FILE")
-  local cleaned=0
-  
-  while IFS= read -r VM; do
-    [ -z "$VM" ] && continue
-    ((cleaned++))
-    
-    log_info "cleanup" "[$cleaned/$total_vms] Processing VM: $VM"
-    
-    VM_JSON=$(az vm show -g "$rg" -n "$VM" -d -o json 2>/dev/null || true)
-    if [ -z "$VM_JSON" ]; then
-      log_warn "cleanup" "VM $VM not found (maybe already deleted)"
-      continue
-    fi
-    
-    # Simple cleanup - just delete the VM for now
-    log_info "cleanup" "Deleting VM $VM..."
-    if az vm delete -g "$rg" -n "$VM" --yes >/dev/null 2>&1; then
-      log_info "cleanup" "VM $VM deleted successfully"
-    else
-      log_warn "cleanup" "Failed to delete VM $VM"
-    fi
-  done < "$CREATED_VMS_FILE"
-  
-  local cleanup_duration; cleanup_duration=$(( $(date +%s) - cleanup_start ))
-  log_info "cleanup" "Cleanup completed in ${cleanup_duration}s for $cleaned VMs"
-}
-
+# Enhanced cleanup_on_exit function
 cleanup_on_exit() {
   local exit_code=$?
-  log_info "main" "Received exit signal, performing cleanup..."
+  log_info "main" "Exit handler triggered (exit_code: $exit_code)"
   
   # Terminar trabajos en segundo plano
-  running_jobs=$(active_jobs)
-  # Ensure running_jobs is a valid number
-  if ! [[ "$running_jobs" =~ ^[0-9]+$ ]]; then
-    running_jobs=0
-  fi
+  local running_jobs
+  running_jobs=$(jobs -p 2>/dev/null | wc -l || echo 0)
   
   if [ "$running_jobs" -gt 0 ]; then
-    log_info "main" "Terminating $running_jobs running jobs..."
-    # Kill all background jobs more reliably
-    for job in $(jobs -p 2>/dev/null); do
-      kill "$job" 2>/dev/null || true
-    done
-    sleep 5
+    log_info "main" "Terminating $running_jobs background jobs..."
+    # Kill all background jobs
+    jobs -p | xargs -r kill 2>/dev/null || true
+    sleep 3
+    # Force kill if still running
+    jobs -p | xargs -r kill -9 2>/dev/null || true
   fi
   
-  # Cleanup de VMs si es necesario
-  if [ "$KEEP_VMS" -eq 0 ] && [ -s "$CREATED_VMS_FILE" ]; then
+  # Cleanup VMs unless KEEP_VMs is set
+  if [ "$KEEP_VMS" -eq 0 ]; then
     cleanup_created_vms
+  else
+    log_warn "main" "Skipping cleanup due to --keep-vms flag"
+    if [ -s "$CREATED_VMS_FILE" ]; then
+      log_info "main" "VMs that were NOT cleaned up:"
+      cat "$CREATED_VMS_FILE" | sed 's/^/  - /'
+    fi
   fi
   
   exit $exit_code
@@ -489,7 +745,8 @@ fi
 
 # Cleanup VMs unless KEEP_VMs
 if [ "$KEEP_VMS" -eq 0 ]; then
-  cleanup_created_vms
+  # Final cleanup happens in cleanup_on_exit
+  : # No-op, cleanup handled by trap
 else
   log_warn "main" "Skipping cleanup due to --keep-vms"
 fi

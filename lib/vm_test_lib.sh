@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib/vm_test_lib.sh - Versión completamente corregida
+# lib/vm_test_lib.sh - Versión con sintaxis bash corregida
 # Basic log wrappers (actual colors are in bootstrap.sh)
 log()  { printf "[INFO] %s\n" "$*"; }
 warn() { printf "[WARN] %s\n" "$*"; }
@@ -36,11 +36,15 @@ label_for() {
   esac
 }
 
-arch_for() { [[ "$1" == arm64_* ]] && echo "arm" || echo "amd"; }
+arch_for() { 
+  [[ "$1" == arm64_* ]] && echo "arm" || echo "amd"
+}
 
-vm_exists() { az vm show -g "$rg" -n "$1" >/dev/null 2>&1; }
+vm_exists() { 
+  az vm show -g "$rg" -n "$1" >/dev/null 2>&1
+}
 
-# ===== MEJORA 1: Sistema de timeouts adaptativos =====
+# ===== Sistema de timeouts adaptativos =====
 configure_adaptive_timeouts() {
   local location="$1" vm_size="$2"
   
@@ -95,7 +99,7 @@ detect_network_issues() {
   fi
 }
 
-# ===== MEJORA 2: SSH robusto con retry inteligente =====
+# ===== SSH robusto con retry inteligente =====
 run_remote_with_retry() {
   local ip="$1" cmd="$2" max_retries="${3:-2}" retry_delay="${4:-10}"
   local attempt=1
@@ -274,10 +278,23 @@ evaluate_policies() {
   local metrics; metrics=$(collect_metrics_for_vm "$vm")
 
   # Helper functions
-  _jq_has() { local key="$1" json="$2"; jq -r --arg k "$key" 'has($k)' <<<"$json"; }
-  _getm() { printf '%s' "$metrics" | jq -r --arg k "$1" '.[$k] // empty'; }
-  _is_number() { [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; }
-  _phase_of_tname() { [[ "$1" =~ ^phase([0-9]+) ]] && echo "${BASH_REMATCH[1]}" || echo 999; }
+  _jq_has() { 
+    local key="$1" json="$2"
+    jq -r --arg k "$key" 'has($k)' <<<"$json"
+  }
+  
+  _getm() { 
+    printf '%s' "$metrics" | jq -r --arg k "$1" '.[$k] // empty'
+  }
+  
+  _is_number() { 
+    [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]
+  }
+  
+  _phase_of_tname() { 
+    [[ "$1" =~ ^phase([0-9]+) ]] && echo "${BASH_REMATCH[1]}" || echo 999
+  }
+  
   local CUR_PHASE; CUR_PHASE=$(_phase_of_tname "$tname")
 
   _cmp() {
@@ -299,7 +316,13 @@ evaluate_policies() {
         contains)   case "$a" in *"$b"*) return 0;; *) return 1;; esac ;;
         ncontains)  case "$a" in *"$b"*) return 1;; *) return 0;; esac ;;
         regex)      printf '%s' "$a" | grep -Eq "$b" ;;
-        in)         IFS=, read -r -a arr <<< "$b"; for x in "${arr[@]}"; do [ "$a" = "$x" ] && return 0; done; return 1 ;;
+        in)         
+          IFS=, read -r -a arr <<< "$b"
+          for x in "${arr[@]}"; do 
+            [ "$a" = "$x" ] && return 0
+          done
+          return 1
+          ;;
         *) return 2 ;;
       esac
     fi
@@ -574,6 +597,13 @@ run_combo() {
     fi
     log "[$vm_name] VM created."
     echo "$vm_name" >> "$CREATED_VMS_FILE"
+    
+    # Register VM and associated resources for tracking
+    local vm_id
+    vm_id=$(az vm show -g "$rg" -n "$vm_name" --query id -o tsv 2>/dev/null || echo "")
+    if [ -n "$vm_id" ] && command -v register_resource >/dev/null 2>&1; then
+      register_resource "$vm_name" "vm" "$vm_id" "$vm_name"
+    fi
   fi
 
   if ! wait_vm_running "$vm_name"; then
@@ -599,6 +629,8 @@ run_combo() {
   local tests_count_local
   local tname
   tests_count_local=$(jq '.tests | length' "$CONFIG")
+  local all_tests_passed=true
+  
   for idx in $(seq 0 $((tests_count_local-1))); do
     tname=$(jq -r ".tests[$idx].name" "$CONFIG")
     local tdir="artifacts/${vm_name}/${tname}"
@@ -673,14 +705,30 @@ run_combo() {
     log "[$vm_name] Test '${tname}' -> ${test_status}"
     
     if [ "$test_status" = "BAD" ]; then
+      all_tests_passed=false
       remaining=$((tests_count_local - idx - 1))
       warn "[$vm_name] Phase '${tname}' failed — aborting remaining ${remaining} phase(s) for this VM."
       if [ "$remaining" -gt 0 ]; then
         append_skip "RUN:ABORT_REST" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "Aborted remaining ${remaining} phase(s) after failure in '${tname}'"
       fi
-      return 0
+      break
     fi
   done
+
+  # Cleanup individual VM on success (optional, can be disabled)
+  if [ "${CLEANUP_ON_SUCCESS:-0}" = "1" ] && [ "$KEEP_VMS" -eq 0 ] && [ "$all_tests_passed" = true ]; then
+    log "[$vm_name] All tests completed successfully. Cleaning up VM..."
+    if command -v cleanup_vm_comprehensive >/dev/null 2>&1 && cleanup_vm_comprehensive "$vm_name"; then
+      log "[$vm_name] VM cleaned up successfully"
+      # Remove from tracking file
+      if [ -f "$CREATED_VMS_FILE" ]; then
+        grep -v "^$vm_name$" "$CREATED_VMS_FILE" > "$CREATED_VMS_FILE.tmp" && \
+          mv "$CREATED_VMS_FILE.tmp" "$CREATED_VMS_FILE" || true
+      fi
+    else
+      warn "[$vm_name] VM cleanup had some issues, but test results are preserved"
+    fi
+  fi
 
   log "[$vm_name] Completed."
 }
@@ -693,13 +741,16 @@ is_safe_to_delete_network() {
   vm_lower=$(echo "$vm_name" | tr "[:upper:]" "[:lower:]")
   vnet_lower=$(echo "$vnet_name" | tr "[:upper:]" "[:lower:]")
   
-  if [[ ! ("$vnet_lower" == "$vm_lower" || 
-           "$vnet_lower" == "$vm_lower-vnet" || 
-           "$vnet_lower" == "${vm_lower}vnet" ||
-           "$vnet_lower" == "t-"*"-vnet") ]]; then
-    log "VNet name $vnet_name doesn't match VM-specific pattern"
-    return 1
-  fi
+  # Check if VNet name matches VM pattern
+  case "$vnet_lower" in
+    "$vm_lower"|"$vm_lower-vnet"|"${vm_lower}vnet"|"t-"*"-vnet")
+      : # Pattern matches, continue
+      ;;
+    *)
+      log "VNet name $vnet_name doesn't match VM-specific pattern"
+      return 1
+      ;;
+  esac
   
   local other_vms
   other_vms=$(az network nic list -g "$subnet_rg" --query "[?ipConfigurations[0].subnet.id=='$subnet_id'].{vm:virtualMachine.id}" -o tsv 2>/dev/null | grep -v "^$" | wc -l)
@@ -773,16 +824,19 @@ print_final_summary() {
   local results_log="$1" skip_log="$2"
 
   local GOOD_CNT BAD_CNT SKIP_CNT
-  GOOD_CNT=$(grep -c '^GOOD|' "$results_log" 2>/dev/null || true)
-  BAD_CNT=$(grep -c '^BAD|'  "$results_log"  2>/dev/null || true)
+  GOOD_CNT=$(grep -c '^GOOD|' "$results_log" 2>/dev/null || echo 0)
+  BAD_CNT=$(grep -c '^BAD|'  "$results_log"  2>/dev/null || echo 0)
   SKIP_CNT=$(wc -l < "$skip_log" 2>/dev/null | tr -d ' ' || echo 0)
 
-  printf "%b==== FINAL SUMMARY (GOOD / BAD / SKIP) ====%b\n" "${C_INFO}" "${C_RESET}"
-  printf "%bGOOD: %s%b\n" "${C_GOOD:-$C_INFO}" "${GOOD_CNT}" "${C_RESET}"
-  printf "%bBAD:  %s%b\n" "${C_ERR}" "${BAD_CNT}" "${C_RESET}"
-  printf "%bSKIP: %s%b\n" "${C_WARN}" "${SKIP_CNT}" "${C_RESET}"
+  printf "%b==== FINAL SUMMARY (GOOD / BAD / SKIP) ====%b\n" "${C_INFO:-}" "${C_RESET:-}"
+  printf "%bGOOD: %s%b\n" "${C_GOOD:-}" "${GOOD_CNT}" "${C_RESET:-}"
+  printf "%bBAD:  %s%b\n" "${C_ERR:-}" "${BAD_CNT}" "${C_RESET:-}"
+  printf "%bSKIP: %s%b\n" "${C_WARN:-}" "${SKIP_CNT}" "${C_RESET:-}"
 
-  count_skip_code() { awk -F'|' -v code="$1" '$1==code{n++} END{print n+0}' "$skip_log" 2>/dev/null; }
+  count_skip_code() { 
+    awk -F'|' -v code="$1" '$1==code{n++} END{print n+0}' "$skip_log" 2>/dev/null
+  }
+  
   CRIT_CREATE=$(count_skip_code 'RUN:CREATE')
   CRIT_IP=$(count_skip_code 'RUN:IP')
   CRIT_SSH=$(count_skip_code 'RUN:SSH')
@@ -794,7 +848,7 @@ print_final_summary() {
   CRIT_VALIDATION=$(count_skip_code 'PRE:VALIDATION')
   CRIT_TOTAL=$((CRIT_CREATE + CRIT_IP + CRIT_SSH + CRIT_REBOOT + CRIT_POWER + CRIT_CREATE_POWER + CRIT_ABORT + CRIT_SSH_LOST + CRIT_VALIDATION))
 
-  printf "%b-- CRITICAL SKIPS --%b\n" "${C_WARN}" "${C_RESET}"
+  printf "%b-- CRITICAL SKIPS --%b\n" "${C_WARN:-}" "${C_RESET:-}"
   printf "PRE:VALIDATION = %d\n" "$CRIT_VALIDATION"
   printf "RUN:CREATE     = %d\n" "$CRIT_CREATE"
   printf "RUN:CREATE_POWER = %d\n" "$CRIT_CREATE_POWER"
@@ -806,20 +860,20 @@ print_final_summary() {
   printf "TOTAL CRITICAL = %d\n" "$CRIT_TOTAL"
   
   if [ "$CRIT_TOTAL" -gt 0 ]; then
-    printf "%b-- Critical SKIP details --%b\n" "${C_WARN}" "${C_RESET}"
-    grep -E '^(PRE:VALIDATION|RUN:CREATE|RUN:CREATE_POWER|RUN:IP|RUN:SSH|RUN:SSH_LOST|RUN:REBOOT_SSH)\|' "$skip_log" || true
+    printf "%b-- Critical SKIP details --%b\n" "${C_WARN:-}" "${C_RESET:-}"
+    grep -E '^(PRE:VALIDATION|RUN:CREATE|RUN:CREATE_POWER|RUN:IP|RUN:SSH|RUN:SSH_LOST|RUN:REBOOT_SSH)\|' "$skip_log" 2>/dev/null || true
   fi
 
   if [ "$GOOD_CNT" -gt 0 ]; then
-    printf "%b-- GOOD details --%b\n" "${C_GOOD:-$C_INFO}" "${C_RESET}"
-    grep '^GOOD|' "$results_log"
+    printf "%b-- GOOD details --%b\n" "${C_GOOD:-}" "${C_RESET:-}"
+    grep '^GOOD|' "$results_log" 2>/dev/null || true
   fi
   if [ "$BAD_CNT" -gt 0 ]; then
-    printf "%b-- BAD details --%b\n" "${C_ERR}" "${C_RESET}"
-    grep '^BAD|' "$results_log"
+    printf "%b-- BAD details --%b\n" "${C_ERR:-}" "${C_RESET:-}"
+    grep '^BAD|' "$results_log" 2>/dev/null || true
   fi
   if [ "$SKIP_CNT" -gt 0 ]; then
-    printf "%b-- SKIP details (all) --%b\n" "${C_WARN}" "${C_RESET}"
-    cat "$skip_log"
+    printf "%b-- SKIP details (all) --%b\n" "${C_WARN:-}" "${C_RESET:-}"
+    cat "$skip_log" 2>/dev/null || true
   fi
 }

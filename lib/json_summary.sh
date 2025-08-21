@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib/json_summary.sh - Versión corregida con validación JSON robusta
+# lib/json_summary.sh - Versión realmente completa con todas las funciones
 num_or_zero() { case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac }
 now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -169,6 +169,16 @@ parse_skip_line() {
       is_critical: $is_critical,
       timestamp: $timestamp
     }'
+}
+
+# Extraer políticas fallidas de manera segura
+extract_failed_policies() {
+  local detail="$1"
+  if [[ "$detail" == *"[POLICY]"* ]]; then
+    echo "$detail" | grep -oE 'name=[^ ]+' | sed 's/name=//' | head -5 | jq -Rn '[inputs]' 2>/dev/null || echo "[]"
+  else
+    echo "[]"
+  fi
 }
 
 write_summary_json() {
@@ -367,14 +377,81 @@ write_summary_json() {
     }
   ' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
   
-  # Actualizar critical_skips
+  # Actualizar critical_skips y otras estadísticas
   if [ -f "$out" ]; then
-    jq '.summary_stats.critical_skips = (.skips | map(select(.is_critical // false)) | length)' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+    jq '
+      .summary_stats.critical_skips = (.skips | map(select(.is_critical // false)) | length) |
+      .summary_stats.policy_failures = (.results | map(select(.status == "BAD" and (.detail // "") | contains("[POLICY]"))) | length) |
+      .summary_stats.by_skip_category = (.skips | group_by(.skip_category) | map({key: .[0].skip_category, value: length}) | from_entries) |
+      .summary_stats.by_series = (.results | group_by(.series) | map({key: .[0].series, value: length}) | from_entries) |
+      .summary_stats.by_type = (.results | group_by(.type) | map({key: .[0].type, value: length}) | from_entries) |
+      .summary_stats.by_status = (.results | group_by(.status) | map({key: .[0].status, value: length}) | from_entries) |
+      .summary_stats.by_failure_category = (.results | 
+        map(select(.status == "BAD")) | 
+        group_by(if (.detail // "") | contains("SSH") then "ssh" 
+                 elif (.detail // "") | contains("TIMEOUT") then "timeout"
+                 elif (.detail // "") | contains("POLICY") then "policy"
+                 else "other" end) | 
+        map({key: (if .[0].detail | contains("SSH") then "ssh" 
+                   elif .[0].detail | contains("TIMEOUT") then "timeout"
+                   elif .[0].detail | contains("POLICY") then "policy"
+                   else "other" end), value: length}) | 
+        from_entries)
+    ' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+  fi
+  
+  # Agregar most_common_failures
+  if [ -f "$out" ]; then
+    jq '
+      .summary_stats.most_common_failures = (
+        .results | 
+        map(select(.status == "BAD")) |
+        group_by(.detail // "unknown") |
+        map({category: .[0].detail // "unknown", count: length}) |
+        sort_by(-.count) |
+        .[0:5]
+      )
+    ' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+  fi
+  
+  # Agregar estadísticas de duración si están disponibles
+  if [ -f "$out" ]; then
+    jq '
+      .performance_stats.duration_stats = {
+        total_execution_time: (
+          if (.vm_rollup | keys | length) > 0 then
+            (.vm_rollup | [.[] | (.phase3_end_time // 0) - (.phase1_start_time // 0)] | max)
+          else 0 end
+        ),
+        avg_vm_duration: (
+          if (.vm_rollup | keys | length) > 0 then
+            (.vm_rollup | [.[] | (.phase3_end_time // 0) - (.phase1_start_time // 0)] | add / length)
+          else 0 end
+        ),
+        avg_phase_durations: {
+          phase1: (
+            if (.vm_rollup | keys | length) > 0 then
+              (.vm_rollup | [.[] | (.phase2_start_time // 0) - (.phase1_start_time // 0)] | add / length)
+            else 0 end
+          ),
+          phase2: (
+            if (.vm_rollup | keys | length) > 0 then
+              (.vm_rollup | [.[] | (.reboot_end_time // 0) - (.phase2_start_time // 0)] | add / length)
+            else 0 end
+          ),
+          phase3: (
+            if (.vm_rollup | keys | length) > 0 then
+              (.vm_rollup | [.[] | (.phase3_end_time // 0) - (.phase3_start_time // 0)] | add / length)
+            else 0 end
+          )
+        }
+      }
+    ' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
   fi
   
   # Validar el JSON final
   if ! jq empty "$out" 2>/dev/null; then
-    warn "Generated JSON is invalid. Creating minimal fallback."
+    echo "Generated JSON is invalid. Creating minimal fallback." >&2
     jq -n \
       --arg ts "$(now_utc)" \
       --arg error "JSON generation failed" \
