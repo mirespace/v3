@@ -182,7 +182,7 @@
     }
   ],
  "policies": {
-  "_comments": "Policy rules are data-driven. 'when'is opcional; 'require' accepts all_of / any_of or a simple condition.",
+  "_comments": "Policy rules are data-driven. 'when' is optional; 'require' accepts all_of / any_of or a simple condition.",
   "global": [
     {
       "name": "phase1_network_driver_present",

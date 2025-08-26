@@ -239,7 +239,8 @@ evaluate_policies() {
   # Missing metric
     if [ -z "$actual" ]; then
       if [ "$mode" = "when" ]; then
-  return 1     # when not met -> skip rule
+  # When condition not met, skip rule
+  return 1
       else
         if [ "$strict" = "1" ]; then
           # strict require on missing metric -> fail and record condition
@@ -359,15 +360,15 @@ evaluate_policies() {
 build_worklist() {
   local series_filter="$1" _rg="$2" _loc="$3" _out_array_name="$4"
   local -n OUT="$4"
-
   for series in "${SERIES[@]}"; do
     [[ "$series_filter" != "all" && "$series" != "$series_filter" ]] && continue
     for type in "${TYPES[@]}"; do
-  # Filter by --type (comma-separated)
+      # Filter by --type (comma-separated)
       if [[ "${TYPE_FILTER:-all}" != "all" ]]; then
         IFS="," read -r -a _tf <<< "$TYPE_FILTER"
         _ok=0; for _t in "${_tf[@]}"; do [[ "$type" == "$_t" ]] && _ok=1 && break; done
         [[ $_ok -eq 1 ]] || continue
+      fi
       fi
 
   # Filter by --arch (derived from type label if provided)
