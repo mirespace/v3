@@ -146,7 +146,7 @@
       "commands": [
         "source /etc/os-release && echo CODENAME=$VERSION_CODENAME",
         "echo METRIC:proposed_enabled=1",
-        "sudo bash -c 'source /etc/os-release; echo \"deb http://archive.ubuntu.com/ubuntu ${VERSION_CODENAME}-proposed main restricted universe multiverse\" > /etc/apt/sources.list.d/proposed.list'",
+        "sudo bash -c 'set -e; source /etc/os-release; arch=\"$(dpkg --print-architecture)\"; case \"$arch\" in amd64|i386) base=\"http://archive.ubuntu.com/ubuntu\" ;; *) base=\"http://ports.ubuntu.com/ubuntu-ports\" ;; esac; echo \"deb [arch=$arch] $base ${VERSION_CODENAME}-proposed main restricted universe multiverse\" > /etc/apt/sources.list.d/proposed.list'",
         "sudo bash -c 'source /etc/os-release; printf \"Package: *\\nPin: release a=%s-proposed\\nPin-Priority: 400\\n\" \"$VERSION_CODENAME\" > /etc/apt/preferences.d/proposed'",
         "sudo apt-get update -y >/dev/null 2>&1",
         "sudo bash -c 'source /etc/os-release; DEBIAN_FRONTEND=noninteractive apt-get install -y -t ${VERSION_CODENAME}-proposed azure-vm-utils'",

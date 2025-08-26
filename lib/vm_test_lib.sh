@@ -369,7 +369,7 @@ build_worklist() {
         _ok=0; for _t in "${_tf[@]}"; do [[ "$type" == "$_t" ]] && _ok=1 && break; done
         [[ $_ok -eq 1 ]] || continue
       fi
-      fi
+      
 
   # Filter by --arch (derived from type label if provided)
       _arch=$(arch_for "$type")
