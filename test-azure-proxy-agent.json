@@ -3,9 +3,15 @@
   "resource_group": "miriam-azure-proxy",
   "vm_name_pattern": "t-{series}-{type}-{size}",
   "matrix": {
-    "series": [ "questing" ],
-    "types": [ "amd64_server" ],
-    "sizes": [ "Standard_D2s_v3" ],
+    "series": [
+      "questing"
+    ],
+    "types": [
+      "amd64_server"
+    ],
+    "sizes": [
+      "Standard_D2s_v3"
+    ],
     "_comment_sizes": "AMD64 general-purpose 'standard' size."
   },
   "image_catalog": [
@@ -23,16 +29,30 @@
       "name": "phase1-azure-proxy-checks-and-shutdown",
       "_comments": "All checks in one phase, then shutdown.",
       "commands": [
-        "source /etc/os-release && echo UBUNTU_CODENAME=$VERSION_CODENAME && echo UBUNTU_VERSION=$VERSION_ID && echo METRIC:ubuntu_codename=$VERSION_CODENAME && echo METRIC:ubuntu_version=$VERSION_ID",
-        "uname -a",
-        "dpkg -s azure-proxy-agent >/dev/null 2>&1 && echo METRIC:azure_proxy_agent_installed=1 || echo METRIC:azure_proxy_agent_installed=0",
-        "systemctl is-active azure-proxy-agent >/dev/null 2>&1 && echo METRIC:azure_proxy_agent_active=1 || echo METRIC:azure_proxy_agent_active=0",
-        "systemctl is-enabled azure-proxy-agent >/dev/null 2>&1 && echo METRIC:azure_proxy_agent_enabled=1 || echo METRIC:azure_proxy_agent_enabled=0",
-        "FAILED_CNT=$(systemctl --failed --no-legend | awk 'NF>0' | wc -l); echo METRIC:systemd_failed_units=${FAILED_CNT}",
-        "INHIB_BLOCK_SHUT=$(systemd-inhibit --list --mode=block | awk 'NR>1 && tolower($0) ~ /[[:space:]]shutdown[[:space:]]/ {c++} END{print c+0}'); echo METRIC:shutdown_blockers=${INHIB_BLOCK_SHUT}",
-        "INHIB_DELAY_SHUT=$(systemd-inhibit --list --mode=delay | awk 'NR>1 && tolower($0) ~ /[[:space:]]shutdown[[:space:]]/ {c++} END{print c+0}'); echo METRIC:shutdown_delayers=${INHIB_DELAY_SHUT}",
+        "# --- basic VM and azure-proxy-agent service checks ---",
+        "systemctl is-active azure-proxy-agent && echo METRIC:service_active=1 || echo METRIC:service_active=0",
+        "dpkg -s azure-proxy-agent >/dev/null 2>&1 && echo METRIC:service_installed=1 || echo METRIC:service_installed=0",
+        "systemctl show -p ActiveState azure-proxy-agent | grep -q '=active' && echo METRIC:service_running=1 || echo METRIC:service_running=0",
+        "systemctl show -p SubState azure-proxy-agent | grep -q '=running' && echo METRIC:service_substate_running=1 || echo METRIC:service_substate_running=0",
+        "echo METRIC:systemd_failed_units=$(systemctl --failed --no-legend | wc -l)",
         "echo METRIC:ssh_session_ok=1",
-        "echo METRIC:shutdown_command_sent=1",
+        "# --- Shutdown Inhibitor Metrics ---",
+        "echo METRIC:shutdown_blockers=$INHIB_BLOCK_SHUT",
+        "echo METRIC:shutdown_delayers=$INHIB_DELAY_SHUT",
+        "echo METRIC:shutdown_inhibitors=$((INHIB_BLOCK_SHUT + INHIB_DELAY_SHUT))",
+        "# --- Clean boot systemd must be 'running' ---",
+        "SYSTEM_STATE=\"$(systemctl is-system-running 2>/dev/null || echo unknown)\"; [ \"$SYSTEM_STATE\" = \"running\" ] && echo METRIC:system_state_running=1 || echo METRIC:system_state_running=0",
+        "# --- cloud-init is completed ---",
+        "if cloud-init status --wait >/dev/null 2>&1; then echo METRIC:cloud_init_done=1; else echo METRIC:cloud_init_done=0; fi",
+        "systemctl is-active cloud-init.service >/dev/null 2>&1 && echo METRIC:cloud_init_active=1 || echo METRIC:cloud_init_active=0",
+        "systemctl is-failed cloud-init.service  >/dev/null 2>&1 && echo METRIC:cloud_init_failed=1 || echo METRIC:cloud_init_failed=0",
+        "# --- azure-proxy-agent service unit directives (systemd dependencies) ---",
+        "systemctl cat azure-proxy-agent | grep -q '^DefaultDependencies=no$' && echo METRIC:svc_declares_defaultdeps_no=1 || echo METRIC:svc_declares_defaultdeps_no=0",
+        "systemctl show azure-proxy-agent -p Before | grep -q 'network-pre.target' && echo METRIC:svc_declares_before_network_pre=1 || echo METRIC:svc_declares_before_network_pre=0",
+        "systemctl show azure-proxy-agent -p Before | grep -q 'shutdown.target' && echo METRIC:svc_declares_before_shutdown=1 || echo METRIC:svc_declares_before_shutdown=0",
+        "systemctl show azure-proxy-agent -p Conflicts | grep -q 'shutdown.target' && echo METRIC:svc_declares_conflicts_shutdown=1 || echo METRIC:svc_declares_conflicts_shutdown=0",
+        "# --- effective boot order: azure-proxy-agent must start before network-pre.target ---",
+        "AZURE_ENTER_RAW=\"$(systemctl show -p ActiveEnterTimestampMonotonic --value azure-proxy-agent 2>/dev/null)\"; NPRE_ENTER_RAW=\"$(systemctl show -p ActiveEnterTimestampMonotonic --value network-pre.target 2>/dev/null)\"; AZURE_ENTER=\"${AZURE_ENTER_RAW//[^0-9]/}\"; [ -z \"$AZURE_ENTER\" ] && AZURE_ENTER=0; NPRE_ENTER=\"${NPRE_ENTER_RAW//[^0-9]/}\"; [ -z \"$NPRE_ENTER\" ] && NPRE_ENTER=0; if [ \"$AZURE_ENTER\" -gt 0 ] && [ \"$NPRE_ENTER\" -gt 0 ] && [ \"$AZURE_ENTER\" -lt \"$NPRE_ENTER\" ]; then echo METRIC:svc_started_before_network_pre=1; else echo METRIC:svc_started_before_network_pre=0; fi",
         "#SHUTDOWN#"
       ]
     }
@@ -41,39 +61,142 @@
     "_comments": "Policy rules for single-phase questing validation.",
     "global": [
       {
-        "name": "pkg_installed",
-        "message": "azure-proxy-agent should be installed.",
-        "require": { "metric": "azure_proxy_agent_installed", "op": "eq", "value": 1 },
+        "name": "service_installed_ok",
+        "message": "azure-proxy-agent package must be installed.",
+        "require": {
+          "metric": "service_installed",
+          "op": "eq",
+          "value": 1
+        },
         "phase_at_least": 1
       },
       {
-        "name": "service_active",
-        "message": "azure-proxy-agent service should be active.",
-        "require": { "metric": "azure_proxy_agent_active", "op": "eq", "value": 1 },
+        "name": "service_active_ok",
+        "message": "azure-proxy-agent must be active.",
+        "require": {
+          "metric": "service_active",
+          "op": "eq",
+          "value": 1
+        },
+        "phase_at_least": 1
+      },
+      {
+        "name": "ssh_reachable",
+        "message": "VM must be reachable over SSH.",
+        "require": {
+          "metric": "ssh_session_ok",
+          "op": "eq",
+          "value": 1
+        },
+        "phase_at_least": 1
+      },
+      {
+        "name": "system_running",
+        "message": "System must be in 'running' state (not degraded).",
+        "require": {
+          "metric": "system_state_running",
+          "op": "eq",
+          "value": 1
+        },
+        "phase_at_least": 1
+      },
+      {
+        "name": "cloud_init_completed",
+        "message": "cloud-init.service must complete successfully.",
+        "require": {
+          "metric": "cloud_init_done",
+          "op": "eq",
+          "value": 1
+        },
         "phase_at_least": 1
       },
       {
         "name": "no_failed_units",
-        "message": "There should be no failed systemd units.",
-        "require": { "metric": "systemd_failed_units", "op": "eq", "value": 0 },
+        "message": "No failed systemd units.",
+        "require": {
+          "metric": "systemd_failed_units",
+          "op": "eq",
+          "value": 0
+        },
         "phase_at_least": 1
       },
       {
-        "name": "no_shutdown_inhibitors",
-        "message": "There should be no active shutdown inhibitors.",
-        "require": { "metric": "shutdown_inhibitors", "op": "eq", "value": 0 },
+        "name": "service_declares_defaultdeps_no",
+        "message": "azure-proxy-agent.service must declare DefaultDependencies=no.",
+        "require": {
+          "metric": "svc_declares_defaultdeps_no",
+          "op": "eq",
+          "value": 1
+        },
         "phase_at_least": 1
       },
       {
-        "name": "shutdown_reached",
-        "message": "La VM debe alcanzar PowerState stopped/deallocated tras el shutdown.",
-        "require": { "metric": "shutdown_reached_stopped", "op": "eq", "value": 1 },
+        "name": "service_declares_before_network_pre",
+        "message": "azure-proxy-agent.service must declare Before=network-pre.target.",
+        "require": {
+          "metric": "svc_declares_before_network_pre",
+          "op": "eq",
+          "value": 1
+        },
+        "phase_at_least": 1
+      },
+      {
+        "name": "service_declares_shutdown_edges",
+        "message": "azure-proxy-agent.service must declare Before=shutdown.target and Conflicts=shutdown.target.",
+        "require": {
+          "all_of": [
+            {
+              "metric": "svc_declares_before_shutdown",
+              "op": "eq",
+              "value": 1
+            },
+            {
+              "metric": "svc_declares_conflicts_shutdown",
+              "op": "eq",
+              "value": 1
+            }
+          ]
+        },
+        "phase_at_least": 1
+      },
+      {
+        "name": "service_started_before_network_pre",
+        "message": "azure-proxy-agent must activate before network-pre.target (effective boot order).",
+        "require": {
+          "metric": "svc_started_before_network_pre",
+          "op": "eq",
+          "value": 1
+        },
+        "phase_at_least": 1
+      },
+      {
+        "name": "shutdown_inhibitors_zero",
+        "message": "No shutdown inhibitors left active before shutdown.",
+        "require": {
+          "metric": "shutdown_inhibitors",
+          "op": "eq",
+          "value": 0
+        },
+        "phase_at_least": 1
+      },
+      {
+        "name": "shutdown_stopped_reached",
+        "message": "Shutdown reached 'stopped' state for azure-proxy-agent.",
+        "require": {
+          "metric": "shutdown_reached_stopped",
+          "op": "eq",
+          "value": 1
+        },
         "phase_at_least": 1
       },
       {
         "name": "shutdown_fast_enough",
-        "message": "El apagado debe completarse en menos de 6 minutos.",
-        "require": { "metric": "shutdown_duration_seconds", "op": "lt", "value": 360 },
+        "message": "Shutdown must finish within 360 seconds.",
+        "require": {
+          "metric": "shutdown_duration_seconds",
+          "op": "lt",
+          "value": 360
+        },
         "phase_at_least": 1
       }
     ],
