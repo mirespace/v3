@@ -487,16 +487,24 @@ build_worklist() {
           [[ $_ok -eq 1 ]] || continue
         fi
 
-  # Arch-specific default filtering for known sizes
+  # Arch/size sanity check (denylist)
         if [[ "$_arch" == arm ]]; then
           case "$size" in
-            Standard_E2pds_v6|Standard_D2pds_v6|Standard_D2plds_v6) : ;;
-            *) append_skip "PRE:SIZE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "-" "ARM64 only E2pds_v6/D2pds_v6/D2plds_v6"; continue ;;
+            *pds_v6|*plds_v6) : ;;  # Cobalt ARM (permitido)
+            *)
+              append_skip "PRE:SIZE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "-" "ARM64 requires Cobalt sizes (*pds_v6/*plds_v6)"
+              continue
+              ;;
           esac
         else
           case "$size" in
-            Standard_E2ads_v6|Standard_D2alds_v6|Standard_D2ls_v6) : ;;
-            *) append_skip "PRE:SIZE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "-" "AMD64 only E2ads_v6/D2alds_v6/D2ls_v6"; continue ;;
+            *pds_v6|*plds_v6)
+              append_skip "PRE:SIZE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "-" "ARM Cobalt size is not valid for amd64"
+              continue
+              ;;
+            *)
+              :  # amd64: we accept others (e.g., Standard_D2s_v3)
+              ;;
           esac
         fi
 
@@ -662,7 +670,19 @@ run_combo() {
         continue
       fi
     
+      # --- Comentarios / líneas informativas: no ejecutar, loguear como [INFO] ---
+      # Skip líneas vacías
+      if [[ -z "${line//[[:space:]]/}" ]]; then
+        continue
+      fi
+      # Si empieza por '#', tratar como comentario
+      if [[ "$line" =~ ^[[:space:]]*# ]]; then
+        echo -e "\n${C_INFO}[INFO]${C_RESET} $line" | tee -a "$stdout_log"
+        continue
+      fi
+
       echo -e "\n${C_CMD}[COMMAND]${C_RESET} $line" | tee -a "$stdout_log"
+
       set +e
       run_remote "$PUBLIC_IP" "$line" 2>&1 | tee -a "$stdout_log"
       rc=${PIPESTATUS[0]}
