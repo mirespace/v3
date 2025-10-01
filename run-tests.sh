@@ -36,6 +36,10 @@ Options:
   --size <a,b,c|all>          Filter by size(s) (from JSON), comma-separated
   --max-parallel <N>          Max concurrent VMs (default: 1)
   --json [path]               Emit artifacts/summary.json (or custom path)
+  --phase <N>                 Run only phase N (shorthand for --start-phase N --end-phase N)
+  --start-phase <N>           First phase to run (default: 1)
+  --end-phase <N>             Last phase to run  (default: very large)
+  --assume-prior-ok           Mark phases < start-phase as GOOD (treated as passed)
   --keep-vms                  Do NOT delete VMs at the end (for debugging)
   --cleanup-network           Also attempt subnet/VNet cleanup (safe heuristic)
   -h, --help                  Show this help. If <config.json> is provided, list accepted values
@@ -144,6 +148,10 @@ while (( "$#" )); do
     --type)         TYPE_FILTER="${2-}";  shift 2 ;;
     --size)         SIZE_FILTER="${2-}";  shift 2 ;;
     --keep-vms)     KEEP_VMS=1;            shift 1 ;;
+    --phase)        PHASE_SINGLE="${2-}"; shift 2 ;;
+    --start-phase)  MIN_PHASE="${2-}";    shift 2 ;;
+    --end-phase)    MAX_PHASE="${2-}";    shift 2 ;;
+    --assume-prior-ok) ASSUME_PRIOR_PHASES_OK=1; shift 1 ;;
     --cleanup-network) CLEANUP_NETWORK=1;  shift 1 ;;
     --json|--json=*)
       ENABLE_JSON_SUMMARY=1
@@ -231,6 +239,17 @@ LOCATION=$(az group show --name "$rg" --query "location" -o tsv 2>/dev/null || t
 [ -n "$LOCATION" ] || { err "Resource group '$rg' does not exist or is not accessible"; exit 65; }
 log "Resource group: $rg (location: $LOCATION)"
 
+jq -e '
+  (.image_catalog // []) | all(
+    (has("custom") and (type=="array" or type=="object")? | not) as $okCustom
+    | ( (has("custom")) or (has("offer") and has("sku")) )
+  )
+' "$CONFIG" >/dev/null || {
+  echo "Config error: each image_catalog item must have either {custom} OR {offer, sku}" >&2
+  exit 66
+}
+log "Config looks good."
+
 readarray -t SERIES < <(jq -r '.matrix.series[]' "$CONFIG")
 readarray -t TYPES  < <(jq -r '.matrix.types[]'  "$CONFIG")
 readarray -t SIZES  < <(jq -r '.matrix.sizes[]'  "$CONFIG")
@@ -238,6 +257,21 @@ tests_count=$(jq '.tests | length' "$CONFIG")
 [ "$tests_count" -gt 0 ] || { err "No tests defined"; exit 65; }
 
 # -------------------------- Logs ----------------------------
+
+# --------- Normalize/Export phase filtering options ----------
+# --phase N is sugar for --start-phase N --end-phase N
+if [[ -n "${PHASE_SINGLE:-}" ]]; then
+  MIN_PHASE="$PHASE_SINGLE"
+  MAX_PHASE="$PHASE_SINGLE"
+fi
+# Defaults if user didn’t specify
+MIN_PHASE="${MIN_PHASE:-1}"
+# A big number so we don’t have to know how many phases exist
+MAX_PHASE="${MAX_PHASE:-9999}"
+
+export MIN_PHASE MAX_PHASE ASSUME_PRIOR_PHASES_OK IMAGE_REF
+
+
 mkdir -p "$ARTIFACTS_DIR"
 BAD_POLICY_LOG="${ARTIFACTS_DIR}/_bad_policy.log"
 BAD_CMD_LOG="${ARTIFACTS_DIR}/_bad_cmd.log"
@@ -271,7 +305,7 @@ pre_run_cleanup_leftovers() {
 
   log "[pre] Searching for leftover VMs from previous runs that match the current matrix…"
   for tuple in "${_worklist_ref[@]}"; do
-    IFS='|' read -r series type size offer sku vm_name <<<"$tuple"
+    IFS='|' read -r series type size offer sku custom vm_name <<<"$tuple"
 
     # Existe la VM en Azure pero no es de esta ejecución (no está registrada en _created_vms.list)
     if az vm show -g "$rg" -n "$vm_name" >/dev/null 2>&1; then
@@ -334,17 +368,18 @@ cleanup_function() {
   # Imprimir summary unificado
   if [ $SUMMARY_PRINTED -eq 0 ]; then
     {
-      # Summary básico (GOOD/BAD/SKIP)
-      if declare -f print_final_summary >/dev/null 2>&1; then
-        print_final_summary "$RESULTS_LOG" "$SKIP_LOG" || true
-      fi
-
       # Summary extendido mejorado (o el antiguo si no existe el nuevo)
       if declare -f print_enhanced_final_summary >/dev/null 2>&1; then
         print_enhanced_final_summary "${ARTIFACTS_DIR:-artifacts}" "$CONFIG" || true
       elif declare -f print_final_summary_ext >/dev/null 2>&1; then
         print_final_summary_ext "${ARTIFACTS_DIR:-artifacts}" "$CONFIG" || true
       fi
+
+      # Summary básico (GOOD/BAD/SKIP)
+      if declare -f print_final_summary >/dev/null 2>&1; then
+        print_final_summary "$RESULTS_LOG" "$SKIP_LOG" || true
+      fi
+
     } | tee -a "$FINAL_SUMMARY_LOG"
     SUMMARY_PRINTED=1
   fi
@@ -812,9 +847,9 @@ fi
 
 # ---------------------- Parallel exec -----------------------
 for tuple in "${WORKLIST[@]}"; do
-  IFS='|' read -r series type size offer sku vm_name <<<"$tuple"
+  IFS='|' read -r series type size offer sku custom vm_name <<<"$tuple"
   while [ "$(active_jobs)" -ge "$MAX_PARALLEL" ]; do sleep 1; done
-  ( run_combo "$series" "$type" "$size" "$offer" "$sku" "$vm_name" ) &
+  ( run_combo "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "$custom" ) &
 done
 
 # ⚠️ No dejar que 'wait' con exit!=0 pare el script

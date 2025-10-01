@@ -7,7 +7,8 @@ err()  { printf "[ERROR] %s\n" "$*" >&2; }
 catalog_lookup() {
   local series="$1" type="$2"
   jq -r --arg s "$series" --arg t "$type" '
-    .image_catalog[]? | select(.series==$s and .type==$t and .offer and .sku) | [.offer,.sku] | @tsv
+    .image_catalog[]? | select(.series==$s and .type==$t)
+    | [ (.offer // ""), (.sku // ""), (.custom // "") ] | @tsv
   ' "$CONFIG" | head -n1
 }
 
@@ -21,7 +22,7 @@ label_for() {
         Standard_E2ads_v6)  echo "nvme2-mlx" ;;
         Standard_D2alds_v6) echo "nvme1" ;;
         Standard_D2ls_v6)   echo "mana" ;;
-        *)                  echo "amd64-other" ;;
+        *)                  echo "standard" ;;
       esac ;;
     arm64_*)
       case "$size" in
@@ -29,7 +30,7 @@ label_for() {
         Standard_D2pds_v6)  echo "nvme1-arm64" ;;
         Standard_D2plds_v6) echo "nvme1-arm64-2g" ;;
         Standard_D2ls_v6)   echo "mana-arm64" ;;
-        *)                   echo "arm64-other" ;;
+        *)                   echo "standard" ;;
       esac ;;
     *) echo "unknown" ;;
   esac
@@ -64,7 +65,11 @@ wait_vm_running() {
   local sleep_s="${VM_POWER_SLEEP:-5}"
   log "[$name] Waiting for PowerState/running (retries=$retries, sleep=${sleep_s}s) ..."
   for _ in $(seq 1 "$retries"); do
-    state="$(az vm get-instance-view -g "$rg" -n "$name" --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" -o tsv 2>/dev/null | tail -n1)"
+    state=$(
+      az vm get-instance-view -g "$rg" -n "$name" \
+      --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [-1]" \
+      -o tsv 2>/dev/null | tail -n1
+    )
     if [[ "$state" == "PowerState/running" ]]; then
       log "[$name] VM is running."
       return 0
@@ -74,6 +79,72 @@ wait_vm_running() {
   warn "[$name] VM did not reach PowerState/running in time (last state='${state:-unknown}')."
   return 1
 }
+
+#
+# ---- Shutdown helpers (Azure) ----
+#
+
+# Devuelve 0 si el recurso 'custom' existe, 1 si no.
+custom_image_exists() {
+  local rid="$1"
+  # az resource show suele bastar para definitions / images (Compute Gallery).
+  # No requiere conocer el api-version exacto para ids válidos.
+  az resource show --ids "$rid" -o none >/dev/null 2>&1
+}
+
+# Devuelve displayStatus (ej. "VM running" | "VM stopped" | "VM deallocated") o "unknown"
+get_power_state_display() {
+  local name="$1"
+  az vm get-instance-view -g "$rg" -n "$name" \
+    --query "instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus | [-1]" \
+    -o tsv 2>/dev/null || echo "unknown"
+}
+
+# Espera a que la VM esté stopped/deallocated (timeout y poll configurables)
+wait_vm_stopped() {
+  local name="$1"
+  local timeout="${VM_SHUTDOWN_TIMEOUT_SECONDS:-480}"
+  local poll="${VM_SHUTDOWN_POLL_SECONDS:-5}"
+  local start_ts now state
+  start_ts="$(date +%s)"
+  while :; do
+    state="$(get_power_state_display "$name")"
+    if [[ "$state" == "VM stopped" || "$state" == "VM deallocated" || "$state" == *"stopped"* || "$state" == *"deallocated"* ]]; then
+      now="$(date +%s)"
+      echo "METRIC:shutdown_reached_stopped=1"
+      echo "METRIC:shutdown_duration_seconds=$(( now - start_ts ))"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - start_ts > timeout )); then
+      echo "METRIC:shutdown_reached_stopped=0"
+      echo "METRIC:shutdown_duration_seconds=$(( now - start_ts ))"
+      echo "METRIC:shutdown_last_state=$(printf '%q' "${state:-unknown}")"
+      return 1
+    fi
+    sleep "$poll"
+  done
+}
+
+# Lanza 'shutdown -h now' por SSH con mejor esfuerzo (sin reintentos)
+send_shutdown_over_ssh() {
+  local ip="$1"
+  if ssh -i "$SSH_PRIV_DEFAULT" \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-6}" \
+        -o ServerAliveInterval="${SERVER_ALIVE_INTERVAL:-10}" \
+        -o ServerAliveCountMax="${SERVER_ALIVE_COUNTMAX:-6}" \
+        -o ConnectionAttempts=1 \
+        "${ADMIN_USER:-ubuntu}@${ip}" \
+        "sudo shutdown -h now || true" >/dev/null 2>&1; then
+    echo "METRIC:shutdown_command_sent=1"
+  else
+    echo "METRIC:shutdown_command_sent=0"
+  fi
+}
+
+
 
 restart_vm() {
   local name="$1"
@@ -118,7 +189,7 @@ run_remote() {
 
   # Exponential backoff with limit
     local sleep_s=$(( 1 << (try-1) ))
-    if [ $sleep_s -gt $backoff_max ]; then sleep_s=$backoff_max; fi
+    if [ $sleep_s -gt "$backoff_max" ]; then sleep_s=$backoff_max; fi
     warn "[SSH] transient 255 running: ${cmd}; retry ${try}/${attempts} in ${sleep_s}s..."
     sleep "$sleep_s"
     try=$((try+1))
@@ -382,20 +453,30 @@ build_worklist() {
         append_skip "PRE:CATALOG" "$series" "$type" "*" "-" "-" "-" "No catalog entry"
         continue
       fi
-      IFS=$'\t' read -r offer sku <<<"${osline[0]}"
+      IFS=$'\t' read -r offer sku custom <<<"${osline[0]}"
 
-  # Validate availability in region -> SKIP early if not
-      offer_ok=$(az vm image list-offers --location "$_loc" --publisher "${PUBLISHER:-Canonical}" --query "[?name=='$offer'] | length(@)" -o tsv)
-      if [ "$offer_ok" != "1" ]; then
-        warn "SKIP: offer '$offer' not available in '$_loc'."
-        append_skip "PRE:OFFER" "$series" "$type" "*" "$offer" "$sku" "-" "Offer not in region $_loc"
-        continue
-      fi
-      sku_ok=$(az vm image list-skus --location "$_loc" --publisher "${PUBLISHER:-Canonical}" --offer "$offer" --query "[?name=='$sku'] | length(@)" -o tsv)
-      if [ "$sku_ok" != "1" ]; then
-        warn "SKIP: sku '$sku' not available under offer '$offer' in '$_loc'."
-        append_skip "PRE:SKU" "$series" "$type" "*" "$offer" "$sku" "-" "SKU not in region $_loc"
-        continue
+  # Availability:
+  #   - Si hay 'custom', NO comprobar Marketplace; validar que el recurso exista.
+  #   - Si NO hay 'custom', mantener validación offer/sku de Marketplace.
+      if [[ -n "$custom" ]]; then
+        if ! custom_image_exists "$custom"; then
+          warn "SKIP: custom image not found: $custom"
+          append_skip "PRE:CUSTOM" "$series" "$type" "*" "$offer" "$sku" "$custom" "Custom image not found"
+          continue
+        fi
+      else
+        offer_ok=$(az vm image list-offers --location "$_loc" --publisher "${PUBLISHER:-Canonical}" --query "[?name=='$offer'] | length(@)" -o tsv)
+        if [ "$offer_ok" != "1" ]; then
+          warn "SKIP: offer '$offer' not available in '$_loc'."
+          append_skip "PRE:OFFER" "$series" "$type" "*" "$offer" "$sku" "-" "Offer not in region $_loc"
+          continue
+        fi
+        sku_ok=$(az vm image list-skus --location "$_loc" --publisher "${PUBLISHER:-Canonical}" --offer "$offer" --query "[?name=='$sku'] | length(@)" -o tsv)
+        if [ "$sku_ok" != "1" ]; then
+          warn "SKIP: sku '$sku' not available under offer '$offer' in '$_loc'."
+          append_skip "PRE:SKU" "$series" "$type" "*" "$offer" "$sku" "-" "SKU not in region $_loc"
+          continue
+        fi
       fi
 
       for size in "${SIZES[@]}"; do
@@ -425,14 +506,21 @@ build_worklist() {
         name_raw="${name_raw//\{size\}/$vm_label}"
         vm_name="$(slugify "$name_raw")"
 
-        OUT+=("${series}|${type}|${size}|${offer}|${sku}|${vm_name}")
+        OUT+=("${series}|${type}|${size}|${offer}|${sku}|${custom}|${vm_name}")
       done
     done
   done
 }
 
+
+# Helper: extract numeric phase from a test name like "phase3-postchecks"
+_phase_of_tname_simple() {
+  [[ "$1" =~ ^phase([0-9]+) ]] && echo "${BASH_REMATCH[1]}" || echo 999
+}
+
+
 run_combo() {
-  local series="$1" type="$2" size="$3" offer="$4" sku="$5" vm_name="$6"
+  local series="$1" type="$2" size="$3" offer="$4" sku="$5" vm_name="$6" custom_image="$7"
 
   log "[$vm_name] Starting -> series=$series type=$type size=$size offer=$offer sku=$sku"
   log "[$vm_name] Label: $(label_for "$type" "$size") | Arch: $(arch_for "$type")"
@@ -445,9 +533,16 @@ run_combo() {
     local create_log="${artifacts_dir}/_create_output.log"
     local arch; arch="$(arch_for "$type")"
     local label; label="$(label_for "$type" "$size")"
-    local image="${PUBLISHER:-Canonical}:$offer:$sku:${VERSION:-latest}"
-    log "[$vm_name] Creating VM with urn image='$image' ..."
 
+    local image
+    if [[ -n "${custom_image:-}" ]]; then
+      image="$custom_image"
+      log "[$vm_name] Creating VM with custom image='$image' ..."
+    else
+      image="${PUBLISHER:-Canonical}:$offer:$sku:${VERSION:-latest}"
+      log "[$vm_name] Creating VM with urn image='$image' ..."
+    fi
+    
     if ! az vm create \
          --resource-group "$rg" \
          --name "$vm_name" \
@@ -487,6 +582,28 @@ run_combo() {
   tests_count_local=$(jq '.tests | length' "$CONFIG")
   for idx in $(seq 0 $((tests_count_local-1))); do
     tname=$(jq -r ".tests[$idx].name" "$CONFIG")
+    local tphase; tphase="$(_phase_of_tname_simple "$tname")"
+    local minp="${MIN_PHASE:-1}" maxp="${MAX_PHASE:-9999}"
+
+    # ------------ Phase filtering ------------
+    if (( tphase < minp )); then
+      # Earlier phase than requested
+      if [[ "${ASSUME_PRIOR_PHASES_OK:-0}" = "1" ]]; then
+        # Count it as GOOD so summaries still show “all phases OK”
+        append_result "GOOD" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "$tname" "/dev/null" "assumed_ok"
+        log "[$vm_name] Test '${tname}' -> assumed GOOD (prior phase)"
+      else
+        append_skip "RUN:PHASE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "Skipped due to --start-phase"
+        log "[$vm_name] Skipping '${tname}' (before MIN_PHASE=$minp)"
+      fi
+      continue
+    fi
+    if (( tphase > maxp )); then
+      append_skip "RUN:PHASE_FILTER" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "Skipped due to --end-phase"
+      log "[$vm_name] Skipping '${tname}' (after  MAX_PHASE=$maxp)"
+      continue
+    fi
+
     local tdir="artifacts/${vm_name}/${tname}"
     mkdir -p "$tdir"
     local stdout_log="${tdir}/stdout.log"; : > "$stdout_log"
@@ -522,6 +639,26 @@ run_combo() {
           test_status="BAD"
           break
         fi
+        continue
+      fi
+
+      if [[ "$line" == "#SHUTDOWN#" ]]; then
+        echo -e "\n${C_INFO}[TEST]${C_RESET} Requesting VM shutdown and validating PowerState..." | tee -a "$stdout_log"
+        # Intentar mandar el shutdown por SSH (si ya se cayó la sesión, la métrica lo reflejará)
+        if [[ -n "${PUBLIC_IP:-}" ]]; then
+          send_shutdown_over_ssh "$PUBLIC_IP" | tee -a "$stdout_log"
+        else
+          echo "METRIC:shutdown_command_sent=0" | tee -a "$stdout_log"
+        fi
+        # Esperar a estado detenido/deasignado desde Azure
+        if wait_vm_stopped "$vm_name" | tee -a "$stdout_log"; then
+          echo -e "${C_INFO}[TEST]${C_RESET} Shutdown reached stopped/deallocated." | tee -a "$stdout_log"
+        else
+          err "[$vm_name] Shutdown TIMED OUT before reaching stopped/deallocated."
+          append_bad  "RUN:SHUTDOWN_TIMEOUT" "$series" "$type" "$size" "$offer" "$sku" "$vm_name" "Shutdown did not reach stopped/deallocated in time"
+          test_status="BAD"
+        fi
+        # No más comandos tras #SHUTDOWN#: continuar con siguiente test/VM
         continue
       fi
     
