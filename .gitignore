@@ -2,3 +2,4 @@ artifacts*
 patches
 *.old
 _screen*.log
+.vscode
