@@ -1,0 +1,82 @@
+{
+  "_comments": "Questing: single-phase azure-proxy validation. Emits METRIC: key=value lines for JSON summary.",
+  "resource_group": "miriam-azure-proxy",
+  "vm_name_pattern": "t-{series}-{type}-{size}",
+  "matrix": {
+    "series": [ "questing" ],
+    "types": [ "amd64_server" ],
+    "sizes": [ "Standard_D2s_v3" ],
+    "_comment_sizes": "AMD64 general-purpose 'standard' size."
+  },
+  "image_catalog": [
+    {
+      "series": "questing",
+      "type": "amd64_server",
+      "offer": "ubuntu-25_10",
+      "sku": "server",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/questing-server-amd64-gen2",
+      "_comments": "Custom Gen2 image for questing server amd64."
+    }
+  ],
+  "tests": [
+    {
+      "name": "phase1-azure-proxy-checks-and-shutdown",
+      "_comments": "All checks in one phase, then shutdown.",
+      "commands": [
+        "source /etc/os-release && echo UBUNTU_CODENAME=$VERSION_CODENAME && echo UBUNTU_VERSION=$VERSION_ID && echo METRIC:ubuntu_codename=$VERSION_CODENAME && echo METRIC:ubuntu_version=$VERSION_ID",
+        "uname -a",
+        "dpkg -s azure-proxy-agent >/dev/null 2>&1 && echo METRIC:azure_proxy_agent_installed=1 || echo METRIC:azure_proxy_agent_installed=0",
+        "systemctl is-active azure-proxy-agent >/dev/null 2>&1 && echo METRIC:azure_proxy_agent_active=1 || echo METRIC:azure_proxy_agent_active=0",
+        "systemctl is-enabled azure-proxy-agent >/dev/null 2>&1 && echo METRIC:azure_proxy_agent_enabled=1 || echo METRIC:azure_proxy_agent_enabled=0",
+        "FAILED_CNT=$(systemctl --failed --no-legend | awk 'NF>0' | wc -l); echo METRIC:systemd_failed_units=${FAILED_CNT}",
+        "INHIB_BLOCK_SHUT=$(systemd-inhibit --list --mode=block | awk 'NR>1 && tolower($0) ~ /[[:space:]]shutdown[[:space:]]/ {c++} END{print c+0}'); echo METRIC:shutdown_blockers=${INHIB_BLOCK_SHUT}",
+        "INHIB_DELAY_SHUT=$(systemd-inhibit --list --mode=delay | awk 'NR>1 && tolower($0) ~ /[[:space:]]shutdown[[:space:]]/ {c++} END{print c+0}'); echo METRIC:shutdown_delayers=${INHIB_DELAY_SHUT}",
+        "echo METRIC:ssh_session_ok=1",
+        "echo METRIC:shutdown_command_sent=1",
+        "#SHUTDOWN#"
+      ]
+    }
+  ],
+  "policies": {
+    "_comments": "Policy rules for single-phase questing validation.",
+    "global": [
+      {
+        "name": "pkg_installed",
+        "message": "azure-proxy-agent should be installed.",
+        "require": { "metric": "azure_proxy_agent_installed", "op": "eq", "value": 1 },
+        "phase_at_least": 1
+      },
+      {
+        "name": "service_active",
+        "message": "azure-proxy-agent service should be active.",
+        "require": { "metric": "azure_proxy_agent_active", "op": "eq", "value": 1 },
+        "phase_at_least": 1
+      },
+      {
+        "name": "no_failed_units",
+        "message": "There should be no failed systemd units.",
+        "require": { "metric": "systemd_failed_units", "op": "eq", "value": 0 },
+        "phase_at_least": 1
+      },
+      {
+        "name": "no_shutdown_inhibitors",
+        "message": "There should be no active shutdown inhibitors.",
+        "require": { "metric": "shutdown_inhibitors", "op": "eq", "value": 0 },
+        "phase_at_least": 1
+      },
+      {
+        "name": "shutdown_reached",
+        "message": "La VM debe alcanzar PowerState stopped/deallocated tras el shutdown.",
+        "require": { "metric": "shutdown_reached_stopped", "op": "eq", "value": 1 },
+        "phase_at_least": 1
+      },
+      {
+        "name": "shutdown_fast_enough",
+        "message": "El apagado debe completarse en menos de 6 minutos.",
+        "require": { "metric": "shutdown_duration_seconds", "op": "lt", "value": 360 },
+        "phase_at_least": 1
+      }
+    ],
+    "by_combo": []
+  }
+}
