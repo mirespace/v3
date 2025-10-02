@@ -4,7 +4,10 @@
   "vm_name_pattern": "t-{series}-{type}-{size}",
   "matrix": {
     "series": [
-      "questing"
+      "questing",
+      "plucky",
+      "noble",
+      "jammy"
     ],
     "types": [
       "amd64_server"
@@ -22,6 +25,30 @@
       "sku": "server",
       "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/questing-server-amd64-gen2",
       "_comments": "Custom Gen2 image for questing server amd64."
+    },
+    {
+      "series": "jammy",
+      "type": "amd64_server",
+      "offer": "0001-com-ubuntu-server-jammy",
+      "sku": "22_04-lts-gen2",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/jammy-server-amd64-gen2",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "amd64_server",
+      "offer": "ubuntu-24_04-lts",
+      "sku": "server",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/noble-server-amd64-gen2",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "amd64_server",
+      "offer": "ubuntu-25_04",
+      "sku": "server",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/plucky-server-amd64-gen2",
+      "_comments": "Gen2"
     }
   ],
   "tests": [
@@ -29,6 +56,7 @@
       "name": "phase1-azure-proxy-checks-and-shutdown",
       "_comments": "All checks in one phase, then shutdown.",
       "commands": [
+        "#ENFORCEPROXYAGENT#",
         "# --- basic VM and azure-proxy-agent service checks ---",
         "systemctl is-active azure-proxy-agent && echo METRIC:service_active=1 || echo METRIC:service_active=0",
         "dpkg -s azure-proxy-agent >/dev/null 2>&1 && echo METRIC:service_installed=1 || echo METRIC:service_installed=0",
