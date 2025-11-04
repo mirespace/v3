@@ -1,0 +1,125 @@
+{
+  "matrix": {
+    "series": ["plucky", "noble", "jammy"],
+    "types": ["amd64_server", "amd64_minimal", "amd64_fde", "arm64_server", "arm64_minimal"],
+    "sizes": [
+      "Standard_D2s_v3",
+      "Standard_D2ps_v6"
+    ],
+    "_comment_sizes": "Standard_D2s_v3 -> AMD64 general-purpose 'standard' size., Standard_D2ps_v6 -> ARM64"
+  },
+  "image_catalog": [
+    {
+      "series": "jammy",
+      "type": "amd64_server",
+      "offer": "0001-com-ubuntu-server-jammy",
+      "sku": "22_04-lts-gen2",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/jammy-server-amd64-gen2",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "jammy",
+      "type": "amd64_minimal",
+      "offer": "0001-com-ubuntu-minimal-jammy",
+      "sku": "minimal-22_04-lts-gen2",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/jammy-minimal-amd64-gen2",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "jammy",
+      "type": "amd64_fde",
+      "offer": "0001-com-ubuntu-confidential-vm-jammy",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/jammy-fde-server-amd64-gen2",
+      "sku": "22_04-lts-cvm",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "jammy",
+      "type": "arm64_server",
+      "offer": "0001-com-ubuntu-server-jammy",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/jammy-server-arm64-gen2",
+      "sku": "22_04-lts-arm64",
+      "_comments": "Gen1"
+    },
+    {
+      "series": "jammy",
+      "type": "arm64_minimal",
+      "offer": "0001-com-ubuntu-minimal-jammy",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/jammy-minimal-arm64-gen2",
+      "sku": "minimal-22_04-lts-arm64",
+      "_comments": "Gen1"
+    },
+    {
+      "series": "noble",
+      "type": "amd64_server",
+      "offer": "ubuntu-24_04-lts",
+      "sku": "server",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/noble-server-amd64-gen2",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "amd64_minimal",
+      "offer": "ubuntu-24_04-lts",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/noble-minimal-amd64-gen2",
+      "sku": "minimal",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "amd64_fde",
+      "offer": "ubuntu-24_04-lts",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/noble-fde-server-amd64-gen2",
+      "sku": "cvm",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "arm64_server",
+      "offer": "ubuntu-24_04-lts",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/noble-server-arm64-gen2",
+      "sku": "server-arm64",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "noble",
+      "type": "arm64_minimal",
+      "offer": "ubuntu-24_04-lts",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/noble-minimal-arm64-gen2",
+      "sku": "minimal-arm64",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "amd64_server",
+      "offer": "ubuntu-25_04",
+      "sku": "server",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/plucky-server-amd64-gen2",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "amd64_minimal",
+      "offer": "ubuntu-25_04",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/plucky-minimal-amd64-gen2",
+      "sku": "minimal",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "arm64_server",
+      "offer": "ubuntu-25_04",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/plucky-server-arm64-gen2",
+      "sku": "server-arm64",
+      "_comments": "Gen2"
+    },
+    {
+      "series": "plucky",
+      "type": "arm64_minimal",
+      "offer": "ubuntu-25_04",
+      "custom": "/subscriptions/4d55f386-4e21-46d0-9a72-4fef530d717a/resourceGroups/miriam-azure-proxy/providers/Microsoft.Compute/galleries/agent/images/plucky-minimal-arm64-gen2",
+      "sku": "minimal-arm64",
+      "_comments": "Gen2"
+    }
+  ]
+}

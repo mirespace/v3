@@ -1,0 +1,30 @@
+{
+  "matrix": {
+    "series": ["plucky", "noble", "jammy"],
+    "types": ["amd64_server", "amd64_minimal", "amd64_fde", "arm64_server", "arm64_minimal"],
+    "sizes": [
+      "Standard_E2ads_v6",
+      "Standard_D2alds_v6",
+      "Standard_D2ls_v6",
+      "Standard_E2pds_v6",
+      "Standard_D2pds_v6",
+      "Standard_D2plds_v6"
+    ]
+  },
+  "image_catalog": [
+    { "series": "jammy", "type": "amd64_server", "offer": "0001-com-ubuntu-server-jammy", "sku": "22_04-lts-gen2" },
+    { "series": "jammy", "type": "amd64_minimal", "offer": "0001-com-ubuntu-minimal-jammy", "sku": "minimal-22_04-lts-gen2" },
+    { "series": "jammy", "type": "amd64_fde", "offer": "0001-com-ubuntu-confidential-vm-jammy", "sku": "22_04-lts-cvm" },
+    { "series": "jammy", "type": "arm64_server", "offer": "0001-com-ubuntu-server-jammy", "sku": "22_04-lts-arm64" },
+    { "series": "jammy", "type": "arm64_minimal", "offer": "0001-com-ubuntu-minimal-jammy", "sku": "minimal-22_04-lts-arm64" },
+    { "series": "noble", "type": "amd64_server", "offer": "ubuntu-24_04-lts", "sku": "server" },
+    { "series": "noble", "type": "amd64_minimal", "offer": "ubuntu-24_04-lts", "sku": "minimal" },
+    { "series": "noble", "type": "amd64_fde", "offer": "ubuntu-24_04-lts", "sku": "cvm" },
+    { "series": "noble", "type": "arm64_server", "offer": "ubuntu-24_04-lts", "sku": "server-arm64" },
+    { "series": "noble", "type": "arm64_minimal", "offer": "ubuntu-24_04-lts", "sku": "minimal-arm64" },
+    { "series": "plucky", "type": "amd64_server", "offer": "ubuntu-25_04", "sku": "server" },
+    { "series": "plucky", "type": "amd64_minimal", "offer": "ubuntu-25_04", "sku": "minimal" },
+    { "series": "plucky", "type": "arm64_server", "offer": "ubuntu-25_04", "sku": "server-arm64" },
+    { "series": "plucky", "type": "arm64_minimal", "offer": "ubuntu-25_04", "sku": "minimal-arm64" }
+  ]
+}

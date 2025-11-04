@@ -3,3 +3,6 @@ patches
 *.old
 _screen*.log
 .vscode
+*.log
+.github
+.venv

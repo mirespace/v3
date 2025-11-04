@@ -1,0 +1,28 @@
+{
+  "_comments": "Updated tests to 3-phase plan from LP:2116077 | Now emits METRIC: key=value lines for JSON summary enrichment.",
+  "resource_group": "miriam-azure-vm-utils",
+  "vm_name_pattern": "t-{series}-{type}-{size}",
+  "matrix_ref": "config/matrices/ga-image-matrix.json",
+  "tests": [
+    {
+      "name": "phase1-check-installed",
+      "_comments": "Pre-checks of series, disks and networking (Test Plan). Emits METRIC lines.",
+      "commands": [
+        "PACKAGE='azure-vm-utils';AZVER=$(dpkg -s $PACKAGE 2>/dev/null | awk -F\": \" '/^Version:/{print $2}'); echo METRIC:$PACKAGE_version=${AZVER:-unknown}"
+      ]
+    }
+  ],
+  "policies": {
+    "_comments": "Policy rules are data-driven. 'when' is optional; 'require' accepts all_of / any_of or a simple condition.",
+    "global": [
+      {
+        "name": "package is installed",
+        "_comments": "The name of the package to verify is hardcoded: Change it when needed",
+        "message": "The image has installed azure-vm-utils by default.",
+        "require": { "metric": "azure-vm-utils_version", "op": "ne", "value": "unknown" },
+        "phase_at_least": 2
+      }
+    ],
+    "by_combo": []
+  }
+}
